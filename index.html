@@ -3878,20 +3878,16 @@
         function getBulkFilterOptions(key, currentFilters, excludeKey) {
             let base = [...(data.documents || [])];
             if (excludeKey !== 'anio' && (currentFilters.anio||[]).length) {
-                base = base.filter(d => {
-                    if (!d.fechaActualizacion) return false;
-                    const p = String(d.fechaActualizacion).split('/');
-                    return p.length === 3 && currentFilters.anio.includes(p[2]);
-                });
+                base = base.filter(d => yearMatchesFilterSelection(d, currentFilters.anio));
             }
             if (excludeKey !== 'unidad' && (currentFilters.unidad||[]).length)
-                base = base.filter(d => currentFilters.unidad.includes(d.unidad));
+                base = base.filter(d => valueMatchesFilterSelection(d.unidad, currentFilters.unidad));
             if (excludeKey !== 'area' && (currentFilters.area||[]).length)
-                base = base.filter(d => currentFilters.area.includes(d.area));
+                base = base.filter(d => valueMatchesFilterSelection(d.area, currentFilters.area));
             if (excludeKey !== 'departamento' && (currentFilters.departamento||[]).length)
-                base = base.filter(d => currentFilters.departamento.includes(d.departamento));
+                base = base.filter(d => valueMatchesFilterSelection(d.departamento, currentFilters.departamento));
             if (excludeKey !== 'categoria' && (currentFilters.categoria||[]).length)
-                base = base.filter(d => currentFilters.categoria.includes(d.categoria));
+                base = base.filter(d => valueMatchesFilterSelection(d.categoria, currentFilters.categoria));
             if (key === 'anio') return getYearsFromDocs(base);
             return getUniqueValuesFromDocs(key, base);
         }
@@ -3901,16 +3897,12 @@
             if (!any) return [];
             let f = [...(data.documents || [])];
             if ((filters.anio||[]).length) {
-                f = f.filter(d => {
-                    if (!d.fechaActualizacion) return false;
-                    const p = String(d.fechaActualizacion).split('/');
-                    return p.length === 3 && filters.anio.includes(p[2]);
-                });
+                f = f.filter(d => yearMatchesFilterSelection(d, filters.anio));
             }
-            if ((filters.unidad||[]).length) f = f.filter(d => filters.unidad.includes(d.unidad));
-            if ((filters.area||[]).length) f = f.filter(d => filters.area.includes(d.area));
-            if ((filters.departamento||[]).length) f = f.filter(d => filters.departamento.includes(d.departamento));
-            if ((filters.categoria||[]).length) f = f.filter(d => filters.categoria.includes(d.categoria));
+            if ((filters.unidad||[]).length) f = f.filter(d => valueMatchesFilterSelection(d.unidad, filters.unidad));
+            if ((filters.area||[]).length) f = f.filter(d => valueMatchesFilterSelection(d.area, filters.area));
+            if ((filters.departamento||[]).length) f = f.filter(d => valueMatchesFilterSelection(d.departamento, filters.departamento));
+            if ((filters.categoria||[]).length) f = f.filter(d => valueMatchesFilterSelection(d.categoria, filters.categoria));
             return f;
         }
 
@@ -3922,7 +3914,7 @@
                 btn.textContent = BULK_DEFAULTS[key];
                 btn.classList.remove('filter-active');
             } else if (selected.length === 1) {
-                btn.textContent = selected[0];
+                btn.textContent = filterValueLabel(selected[0]);
                 btn.classList.add('filter-active');
             } else {
                 btn.textContent = selected.length + ' sel.';
@@ -3940,8 +3932,9 @@
             }
             container.innerHTML = options.map(opt => {
                 const checked = selected.includes(opt) ? 'checked' : '';
+                const label = filterValueLabel(opt);
                 return '<div class="option-item"><input type="checkbox" value="' +
-                    String(opt).replace(/"/g, '&quot;') + '" ' + checked + '><label>' + opt + '</label></div>';
+                    String(opt).replace(/"/g, '&quot;') + '" ' + checked + '><label>' + label + '</label></div>';
             }).join('');
         }
 
@@ -3991,7 +3984,7 @@
             if (!container) return;
             const options = JSON.parse(container.dataset.options || '[]');
             const q = (search || '').toLowerCase().trim();
-            const filtered = q ? options.filter(o => String(o).toLowerCase().includes(q)) : options;
+            const filtered = q ? options.filter(o => filterValueLabel(o).toLowerCase().includes(q) || String(o).toLowerCase().includes(q)) : options;
             renderBulkDropdownOptions(prefix, key, filtered, filters[key] || []);
             container.dataset.options = JSON.stringify(options);
         }
@@ -5759,17 +5752,35 @@
         }
 
         function getUniqueValuesFromDocs(key, docs) {
-            const src = docs || data.documents;
-            const vals = [...new Set(src.map(d => String(d[key] || '').trim()).filter(v => v !== ''))];
-            return vals.sort();
+            const src = docs || data.documents || [];
+            let hasEmpty = false;
+            const vals = new Set();
+            src.forEach(d => {
+                const v = d[key];
+                if (isEmptyFieldValue(v)) {
+                    hasEmpty = true;
+                } else {
+                    vals.add(String(v).trim());
+                }
+            });
+            const sorted = [...vals].sort((a, b) => String(a).localeCompare(String(b), 'es', { sensitivity: 'base' }));
+            // Opción de vacíos al inicio cuando existan registros sin valor
+            if (hasEmpty) sorted.unshift(EMPTY_FILTER_VALUE);
+            return sorted;
         }
 
         function getYearsFromDocs(docs) {
-            const src = docs || data.documents;
+            const src = docs || data.documents || [];
             const years = new Set();
-            src.forEach(d => { if (d.fechaActualizacion) { const p = d.fechaActualizacion.split('/'); if (p.length === 3)
-                        years.add(p[2]); } });
-            return [...years].sort();
+            let hasEmpty = false;
+            src.forEach(d => {
+                const y = getDocYearValue(d);
+                if (y === EMPTY_FILTER_VALUE) hasEmpty = true;
+                else years.add(y);
+            });
+            const sorted = [...years].sort();
+            if (hasEmpty) sorted.unshift(EMPTY_FILTER_VALUE);
+            return sorted;
         }
 
         // ============================================================
@@ -6246,6 +6257,46 @@
         let currentFilters = {};
         let generalFilters = { anio: [], unidad: [], area: [], departamento: [], categoria: [] };
         let openDropdown = null;
+
+        // Valor especial para filtrar campos vacíos / sin dato
+        const EMPTY_FILTER_VALUE = '__EMPTY__';
+        const EMPTY_FILTER_LABEL = '(Vacío)';
+
+        function isEmptyFieldValue(v) {
+            return v === null || v === undefined || String(v).trim() === '';
+        }
+
+        function filterValueLabel(opt) {
+            return opt === EMPTY_FILTER_VALUE ? EMPTY_FILTER_LABEL : String(opt);
+        }
+
+        /** ¿El valor del documento coincide con alguna de las opciones seleccionadas del filtro? */
+        function valueMatchesFilterSelection(rawValue, selected) {
+            if (!selected || selected.length === 0) return true;
+            const isEmpty = isEmptyFieldValue(rawValue);
+            const str = isEmpty ? '' : String(rawValue).trim();
+            for (const sel of selected) {
+                if (sel === EMPTY_FILTER_VALUE) {
+                    if (isEmpty) return true;
+                } else if (str === String(sel).trim()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** Año de fechaActualización, o EMPTY_FILTER_VALUE si no hay fecha válida */
+        function getDocYearValue(d) {
+            if (!d || !d.fechaActualizacion) return EMPTY_FILTER_VALUE;
+            const p = String(d.fechaActualizacion).split('/');
+            if (p.length === 3 && p[2]) return p[2];
+            return EMPTY_FILTER_VALUE;
+        }
+
+        function yearMatchesFilterSelection(d, selected) {
+            if (!selected || selected.length === 0) return true;
+            return selected.includes(getDocYearValue(d));
+        }
 
         const GEN_FILTER_LABELS = { anio: 'Año', unidad: 'Unidad', area: 'Área', departamento: 'Depto',
             categoria: 'Categoría' };
@@ -7013,23 +7064,19 @@ function loadRequiredFieldsLocal() {
         function getDataWithGeneralFilters() {
             let filtered = (typeof getScopedDocuments === 'function') ? getScopedDocuments() : [...data.documents];
             if (generalFilters.anio && generalFilters.anio.length > 0) {
-                filtered = filtered.filter(d => {
-                    if (!d.fechaActualizacion) return false;
-                    const p = String(d.fechaActualizacion).split('/');
-                    return p.length === 3 && generalFilters.anio.includes(p[2]);
-                });
+                filtered = filtered.filter(d => yearMatchesFilterSelection(d, generalFilters.anio));
             }
             if (generalFilters.unidad && generalFilters.unidad.length > 0) {
-                filtered = filtered.filter(d => generalFilters.unidad.includes(d.unidad));
+                filtered = filtered.filter(d => valueMatchesFilterSelection(d.unidad, generalFilters.unidad));
             }
             if (generalFilters.area && generalFilters.area.length > 0) {
-                filtered = filtered.filter(d => generalFilters.area.includes(d.area));
+                filtered = filtered.filter(d => valueMatchesFilterSelection(d.area, generalFilters.area));
             }
             if (generalFilters.departamento && generalFilters.departamento.length > 0) {
-                filtered = filtered.filter(d => generalFilters.departamento.includes(d.departamento));
+                filtered = filtered.filter(d => valueMatchesFilterSelection(d.departamento, generalFilters.departamento));
             }
             if (generalFilters.categoria && generalFilters.categoria.length > 0) {
-                filtered = filtered.filter(d => generalFilters.categoria.includes(d.categoria));
+                filtered = filtered.filter(d => valueMatchesFilterSelection(d.categoria, generalFilters.categoria));
             }
             return filtered;
         }
@@ -7038,7 +7085,7 @@ function loadRequiredFieldsLocal() {
             let filtered = [...baseData];
             for (const [key, values] of Object.entries(currentFilters)) {
                 if (values && values.length > 0) {
-                    filtered = filtered.filter(doc => values.includes(String(doc[key] || '')));
+                    filtered = filtered.filter(doc => valueMatchesFilterSelection(doc[key], values));
                 }
             }
             return filtered;
@@ -7201,9 +7248,10 @@ function getFilteredData() {
             }
             container.innerHTML = options.map(opt => {
                 const checked = selected.includes(opt) ? 'checked' : '';
+                const label = filterValueLabel(opt);
                 return `<div class="option-item">
-                    <input type="checkbox" value="${opt.replace(/"/g, '&quot;')}" ${checked} onchange="onOptionChange('${column}', this)">
-                    <label>${opt}</label>
+                    <input type="checkbox" value="${String(opt).replace(/"/g, '&quot;')}" ${checked} onchange="onOptionChange('${column}', this)">
+                    <label>${label}</label>
                 </div>`;
             }).join('');
             container.dataset.options = JSON.stringify(options);
@@ -7301,9 +7349,10 @@ function getFilteredData() {
             if (searchLower) filtered = options.filter(o => o.toLowerCase().includes(searchLower));
             container.innerHTML = filtered.map(opt => {
                 const checked = selected.includes(opt) ? 'checked' : '';
+                const label = filterValueLabel(opt);
                 return `<div class="option-item">
                     <input type="checkbox" value="${opt.replace(/"/g, '&quot;')}" ${checked} onchange="onOptionChange('${column}', this)">
-                    <label>${opt}</label>
+                    <label>${label}</label>
                 </div>`;
             }).join('');
         }
@@ -7341,27 +7390,23 @@ function getFilteredData() {
             let baseData = (typeof getScopedDocuments === 'function') ? getScopedDocuments() : [...data.documents];
             for (const [key, values] of Object.entries(currentFilters)) {
                 if (values && values.length > 0) {
-                    baseData = baseData.filter(doc => values.includes(String(doc[key] || '')));
+                    baseData = baseData.filter(doc => valueMatchesFilterSelection(doc[key], values));
                 }
             }
             if (excludeKey !== 'anio' && generalFilters.anio.length > 0) {
-                baseData = baseData.filter(d => {
-                    if (!d.fechaActualizacion) return false;
-                    const p = d.fechaActualizacion.split('/');
-                    return p.length === 3 && generalFilters.anio.includes(p[2]);
-                });
+                baseData = baseData.filter(d => yearMatchesFilterSelection(d, generalFilters.anio));
             }
             if (excludeKey !== 'unidad' && generalFilters.unidad.length > 0) {
-                baseData = baseData.filter(d => generalFilters.unidad.includes(d.unidad));
+                baseData = baseData.filter(d => valueMatchesFilterSelection(d.unidad, generalFilters.unidad));
             }
             if (excludeKey !== 'area' && generalFilters.area.length > 0) {
-                baseData = baseData.filter(d => generalFilters.area.includes(d.area));
+                baseData = baseData.filter(d => valueMatchesFilterSelection(d.area, generalFilters.area));
             }
             if (excludeKey !== 'departamento' && generalFilters.departamento.length > 0) {
-                baseData = baseData.filter(d => generalFilters.departamento.includes(d.departamento));
+                baseData = baseData.filter(d => valueMatchesFilterSelection(d.departamento, generalFilters.departamento));
             }
             if (excludeKey !== 'categoria' && generalFilters.categoria.length > 0) {
-                baseData = baseData.filter(d => generalFilters.categoria.includes(d.categoria));
+                baseData = baseData.filter(d => valueMatchesFilterSelection(d.categoria, generalFilters.categoria));
             }
             return baseData;
         }
@@ -7384,7 +7429,7 @@ function getFilteredData() {
                 btn.textContent = GEN_FILTER_DEFAULTS[key];
                 btn.classList.remove('filter-active');
             } else if (selected.length === 1) {
-                btn.textContent = selected[0];
+                btn.textContent = filterValueLabel(selected[0]);
                 btn.classList.add('filter-active');
             } else {
                 btn.textContent = `${selected.length} sel.`;
@@ -7404,9 +7449,10 @@ function getFilteredData() {
             container.dataset.options = JSON.stringify(options);
             container.innerHTML = options.map(opt => {
                 const checked = selected.includes(opt) ? 'checked' : '';
+                const label = filterValueLabel(opt);
                 return `<div class="option-item">
                     <input type="checkbox" value="${String(opt).replace(/"/g, '&quot;')}" ${checked} onchange="onGenOptionChange('${key}', this)">
-                    <label>${opt}</label>
+                    <label>${label}</label>
                 </div>`;
             }).join('');
         }
@@ -7478,12 +7524,13 @@ function getFilteredData() {
             const selected = generalFilters[key] || [];
             const searchLower = search.toLowerCase().trim();
             let filtered = options;
-            if (searchLower) filtered = options.filter(o => String(o).toLowerCase().includes(searchLower));
+            if (searchLower) filtered = options.filter(o => filterValueLabel(o).toLowerCase().includes(searchLower) || String(o).toLowerCase().includes(searchLower));
             container.innerHTML = filtered.map(opt => {
                 const checked = selected.includes(opt) ? 'checked' : '';
+                const label = filterValueLabel(opt);
                 return `<div class="option-item">
                     <input type="checkbox" value="${String(opt).replace(/"/g, '&quot;')}" ${checked} onchange="onGenOptionChange('${key}', this)">
-                    <label>${opt}</label>
+                    <label>${label}</label>
                 </div>`;
             }).join('');
         }
@@ -8757,20 +8804,16 @@ function getFilteredData() {
         function getDashboardFilteredData() {
             let f = (typeof getScopedDocuments === 'function') ? getScopedDocuments() : [...(data.documents || [])];
             if (dashboardFilters.anio && dashboardFilters.anio.length > 0) {
-                f = f.filter(d => {
-                    if (!d.fechaActualizacion) return false;
-                    const p = d.fechaActualizacion.split('/');
-                    return p.length === 3 && dashboardFilters.anio.includes(p[2]);
-                });
+                f = f.filter(d => yearMatchesFilterSelection(d, dashboardFilters.anio));
             }
             if (dashboardFilters.unidad && dashboardFilters.unidad.length > 0) {
-                f = f.filter(d => dashboardFilters.unidad.includes(d.unidad));
+                f = f.filter(d => valueMatchesFilterSelection(d.unidad, dashboardFilters.unidad));
             }
             if (dashboardFilters.area && dashboardFilters.area.length > 0) {
-                f = f.filter(d => dashboardFilters.area.includes(d.area));
+                f = f.filter(d => valueMatchesFilterSelection(d.area, dashboardFilters.area));
             }
             if (dashboardFilters.categoria && dashboardFilters.categoria.length > 0) {
-                f = f.filter(d => dashboardFilters.categoria.includes(d.categoria));
+                f = f.filter(d => valueMatchesFilterSelection(d.categoria, dashboardFilters.categoria));
             }
             return f;
         }
@@ -8972,20 +9015,16 @@ function getFilteredData() {
         function getBaseDataForDashFilter(excludeKey) {
             let baseData = (typeof getScopedDocuments === 'function') ? getScopedDocuments() : [...(data.documents || [])];
             if (excludeKey !== 'anio' && dashboardFilters.anio.length > 0) {
-                baseData = baseData.filter(d => {
-                    if (!d.fechaActualizacion) return false;
-                    const p = d.fechaActualizacion.split('/');
-                    return p.length === 3 && dashboardFilters.anio.includes(p[2]);
-                });
+                baseData = baseData.filter(d => yearMatchesFilterSelection(d, dashboardFilters.anio));
             }
             if (excludeKey !== 'unidad' && dashboardFilters.unidad.length > 0) {
-                baseData = baseData.filter(d => dashboardFilters.unidad.includes(d.unidad));
+                baseData = baseData.filter(d => valueMatchesFilterSelection(d.unidad, dashboardFilters.unidad));
             }
             if (excludeKey !== 'area' && dashboardFilters.area.length > 0) {
-                baseData = baseData.filter(d => dashboardFilters.area.includes(d.area));
+                baseData = baseData.filter(d => valueMatchesFilterSelection(d.area, dashboardFilters.area));
             }
             if (excludeKey !== 'categoria' && dashboardFilters.categoria && dashboardFilters.categoria.length > 0) {
-                baseData = baseData.filter(d => dashboardFilters.categoria.includes(d.categoria));
+                baseData = baseData.filter(d => valueMatchesFilterSelection(d.categoria, dashboardFilters.categoria));
             }
             return baseData;
         }
@@ -9007,7 +9046,7 @@ function getFilteredData() {
                 btn.textContent = DASH_FILTER_DEFAULTS[key];
                 btn.classList.remove('filter-active');
             } else if (selected.length === 1) {
-                btn.textContent = selected[0];
+                btn.textContent = filterValueLabel(selected[0]);
                 btn.classList.add('filter-active');
             } else {
                 btn.textContent = `${selected.length} sel.`;
@@ -9027,9 +9066,10 @@ function getFilteredData() {
             container.dataset.options = JSON.stringify(options);
             container.innerHTML = options.map(opt => {
                 const checked = selected.includes(opt) ? 'checked' : '';
+                const label = filterValueLabel(opt);
                 return `<div class="option-item">
                     <input type="checkbox" value="${String(opt).replace(/"/g, '&quot;')}" ${checked} onchange="onDashOptionChange('${key}', this)">
-                    <label>${opt}</label>
+                    <label>${label}</label>
                 </div>`;
             }).join('');
         }
@@ -9101,12 +9141,13 @@ function getFilteredData() {
             const selected = dashboardFilters[key] || [];
             const searchLower = search.toLowerCase().trim();
             let filtered = options;
-            if (searchLower) filtered = options.filter(o => String(o).toLowerCase().includes(searchLower));
+            if (searchLower) filtered = options.filter(o => filterValueLabel(o).toLowerCase().includes(searchLower) || String(o).toLowerCase().includes(searchLower));
             container.innerHTML = filtered.map(opt => {
                 const checked = selected.includes(opt) ? 'checked' : '';
+                const label = filterValueLabel(opt);
                 return `<div class="option-item">
                     <input type="checkbox" value="${String(opt).replace(/"/g, '&quot;')}" ${checked} onchange="onDashOptionChange('${key}', this)">
-                    <label>${opt}</label>
+                    <label>${label}</label>
                 </div>`;
             }).join('');
         }
