@@ -3301,7 +3301,7 @@
             <div class="modal-actions">
                 <button class="btn btn-gear manager-only" onclick="openRequiredFieldsModal()" title="Configurar campos obligatorios"><i class="fas fa-cog"></i></button>
                 <button class="btn" onclick="closeModal()">Cancelar</button>
-                <button class="btn btn-primary" id="modalSaveBtn">Guardar</button>
+                <button type="button" class="btn btn-primary" id="modalSaveBtn" onclick="saveDocument()">Guardar</button>
             </div>
         </div>
     </div>
@@ -6000,15 +6000,16 @@
         }
 
         async function saveToSupabase(d) {
+            isLocalSaveInProgress = true;
+            lastLocalSaveAt = Date.now();
             try {
-                // Documentos: reemplazo completo (tabla operativa)
-                await supabaseClient.from('documents').delete().neq('id', -1);
+                // Documentos: upsert por id (evita ventana vacía delete+insert que el realtime pisaba)
                 // Historial: NUNCA se borra aquí. Solo se hace upsert.
                 // Solo se elimina historial con clearHistory / deleteHistoryItem.
 
-                if (d.documents && d.documents.length > 0) {
-                    const docsToInsert = d.documents.map(doc => ({
-                        id: doc.id,
+                const mapDocRow = (doc, includePadre) => {
+                    const row = {
+                        id: Number(doc.id),
                         unidad: doc.unidad || '',
                         nomenclatura: doc.nomenclatura || '',
                         nombre: doc.nombre || '',
@@ -6025,17 +6026,53 @@
                         fecha_difusion: doc.fechaDifusion || '',
                         hipervinculo: doc.hipervinculo || '',
                         comentarios: doc.comentarios || '',
-                        status: doc.status || 'Nuevo',
-                        documento_padre: doc.documentoPadre || ''
-                    }));
-                    let { error } = await supabaseClient.from('documents').insert(docsToInsert);
+                        status: doc.status || 'Nuevo'
+                    };
+                    if (includePadre) row.documento_padre = doc.documentoPadre || '';
+                    return row;
+                };
+
+                // Borrar en remoto solo los que ya no existen en local
+                try {
+                    const { data: remoteRows } = await supabaseClient.from('documents').select('id');
+                    const localIds = new Set((d.documents || []).map(doc => Number(doc.id)));
+                    const remoteIds = (remoteRows || []).map(r => Number(r.id));
+                    const toDelete = remoteIds.filter(id => !localIds.has(id));
+                    if (toDelete.length > 0) {
+                        // Borrar por lotes para no saturar
+                        for (let i = 0; i < toDelete.length; i += 200) {
+                            const chunk = toDelete.slice(i, i + 200);
+                            await supabaseClient.from('documents').delete().in('id', chunk);
+                        }
+                    }
+                } catch (delErr) {
+                    console.warn('[Supabase] No se pudieron sincronizar eliminaciones:', delErr);
+                }
+
+                if (d.documents && d.documents.length > 0) {
+                    const docsToUpsert = d.documents.map(doc => mapDocRow(doc, true));
+                    let { error } = await supabaseClient.from('documents').upsert(docsToUpsert, { onConflict: 'id' });
                     // Si la columna documento_padre no existe aún, reintentar sin ella
                     if (error && /documento_padre/i.test(error.message || '')) {
-                        const withoutPadre = docsToInsert.map(({ documento_padre, ...rest }) => rest);
-                        const retry = await supabaseClient.from('documents').insert(withoutPadre);
+                        const withoutPadre = d.documents.map(doc => mapDocRow(doc, false));
+                        const retry = await supabaseClient.from('documents').upsert(withoutPadre, { onConflict: 'id' });
                         error = retry.error;
                     }
+                    // Fallback: si upsert no está permitido, delete+insert clásico
+                    if (error) {
+                        console.warn('[Supabase] upsert falló, usando delete+insert:', error.message || error);
+                        await supabaseClient.from('documents').delete().neq('id', -1);
+                        let ins = await supabaseClient.from('documents').insert(docsToUpsert);
+                        if (ins.error && /documento_padre/i.test(ins.error.message || '')) {
+                            const withoutPadre = d.documents.map(doc => mapDocRow(doc, false));
+                            ins = await supabaseClient.from('documents').insert(withoutPadre);
+                        }
+                        error = ins.error;
+                    }
                     if (error) throw error;
+                } else {
+                    // Lista local vacía → vaciar remoto
+                    await supabaseClient.from('documents').delete().neq('id', -1);
                 }
 
                 // Historial: upsert (conservar y añadir; no borrar eventos existentes)
@@ -6068,6 +6105,10 @@
             } catch (err) {
                 console.error('[Supabase] Error al guardar:', err);
                 return false;
+            } finally {
+                lastLocalSaveAt = Date.now();
+                // Mantener el bloqueo un momento para que lleguen los eventos realtime del propio write
+                setTimeout(() => { isLocalSaveInProgress = false; }, 4000);
             }
         }
 
@@ -6144,12 +6185,14 @@
             // 1. Prioridad: Supabase
             const ok = await saveToSupabase(d);
 
-            // 2. Siempre guardar en localStorage (respaldo de emergencia)
-            saveToLocalStorage(d);
+            // 2. Siempre guardar en localStorage (respaldo de emergencia) con el estado actual
+            saveToLocalStorage(data);
 
             if (!ok) {
                 console.warn('[Sync] Guardado solo en localStorage (Supabase no disponible).');
             }
+            // Marcar momento del guardado local para que realtime no lo pise
+            lastLocalSaveAt = Date.now();
             return ok;
         }
 
@@ -6159,6 +6202,9 @@
         let realtimeChannel = null;
         let isSyncingFromRealtime = false;
         let lastSyncTimestamp = 0;
+        // Evita que el realtime sobrescriba cambios locales durante un guardado (delete+insert)
+        let isLocalSaveInProgress = false;
+        let lastLocalSaveAt = 0;
 
         function setupRealtimeSync() {
             // Evitar múltiples suscripciones
@@ -6196,8 +6242,12 @@
         }
 
         async function handleRealtimeChange(payload) {
-            // Evitar bucles y demasiadas recargas seguidas
+            // Evitar bucles, demasiadas recargas y sobrescribir un guardado local en curso
             const now = Date.now();
+            if (isLocalSaveInProgress || (now - lastLocalSaveAt < 5000)) {
+                console.log('[Realtime] Ignorado (guardado local en curso)');
+                return;
+            }
             if (isSyncingFromRealtime || (now - lastSyncTimestamp < 800)) return;
 
             isSyncingFromRealtime = true;
@@ -7741,8 +7791,9 @@ function getFilteredData() {
 
         function openEditModal(id) {
             if (!isManager) return;
-            const doc = data.documents.find(d => d.id === id); if (!doc) return;
-            editingId = id;
+            const editId = Number(id);
+            const doc = data.documents.find(d => Number(d.id) === editId); if (!doc) return;
+            editingId = editId;
             document.getElementById('modalTitle').innerHTML = '<i class="fas fa-pen"></i> Editar documento';
             document.getElementById('modalSaveBtn').textContent = 'Actualizar';
             document.getElementById('modalSaveBtn').onclick = saveDocument;
@@ -7948,16 +7999,18 @@ function getFilteredData() {
                 return;
             }
             const version = parseInt(document.getElementById('mVersion').value) || 1;
-            const tipo = document.getElementById('mTipo').value.trim();
-            const categoria = getCategoriaByTipo(tipo);
+            const tipo = (document.getElementById('mTipo').value || '').trim();
+            // Siempre respetar lo elegido en el formulario (no recalcular y pisar)
+            let categoria = (document.getElementById('mCategoria').value || '').trim();
+            if (!categoria) categoria = getCategoriaByTipo(tipo);
             const doc = {
                 id: editingId || 0,
-                unidad: document.getElementById('mUnidad').value.trim(),
-                nomenclatura: document.getElementById('mNomenclatura').value.trim(),
-                nombre: document.getElementById('mNombre').value.trim(),
-                macro: document.getElementById('mMacro').value.trim(),
-                area: document.getElementById('mArea').value.trim(),
-                departamento: document.getElementById('mDepartamento').value.trim(),
+                unidad: (document.getElementById('mUnidad').value || '').trim(),
+                nomenclatura: (document.getElementById('mNomenclatura').value || '').trim(),
+                nombre: (document.getElementById('mNombre').value || '').trim(),
+                macro: (document.getElementById('mMacro').value || '').trim(),
+                area: (document.getElementById('mArea').value || '').trim(),
+                departamento: (document.getElementById('mDepartamento').value || '').trim(),
                 tipo: tipo,
                 categoria: categoria,
                 clasificacion: document.getElementById('mClasificacion').value.trim(),
@@ -7976,7 +8029,7 @@ function getFilteredData() {
             if (!validateDocument(doc, editingId !== null)) return;
 
             const isEdit = editingId !== null;
-            const ok = await showConfirm({
+            const confirmed = await showConfirm({
                 title: isEdit ? 'Actualizar documento' : 'Guardar documento',
                 message: isEdit
                     ? `¿Guardar cambios en "${doc.nomenclatura}"?`
@@ -7985,7 +8038,7 @@ function getFilteredData() {
                 confirmText: isEdit ? 'Actualizar' : 'Guardar',
                 cancelText: 'Cancelar'
             });
-            if (!ok) return;
+            if (!confirmed) return;
 
             ['fechaEmision', 'fechaActualizacion', 'fechaAutorizacion', 'fechaDifusion'].forEach(f => {
                 if (doc[f]) {
@@ -7994,27 +8047,34 @@ function getFilteredData() {
                 }
             });
             if (isEdit) {
-                const idx = data.documents.findIndex(d => d.id === editingId);
-                if (idx !== -1) {
-                    const before = { ...data.documents[idx] };
-                    // Comparar el estado anterior con el documento a guardar (ya con fechas formateadas)
-                    const changes = describeDocumentChanges(before, doc);
-                    Object.assign(data.documents[idx], doc);
-                    const detail = formatHistoryChangeList(changes);
-                    const nom = doc.nomenclatura || before.nomenclatura || '';
-                    const nam = doc.nombre || before.nombre || '';
-                    const histText = changes.length
-                        ? ('✏️ ' + nom + ' (' + nam + ') actualizado — ' + detail)
-                        : ('✏️ ' + nom + ' (' + nam + ') actualizado — sin cambios en campos');
-                    data.history.push({
-                        id: data.historyNextId++,
-                        text: histText,
-                        timestamp: Date.now()
-                    });
-                    console.log('[History]', histText);
+                const editId = Number(editingId);
+                const idx = data.documents.findIndex(d => Number(d.id) === editId);
+                if (idx === -1) {
+                    showToast('No se encontró el documento a actualizar', 'warning');
+                    return;
                 }
+                const before = { ...data.documents[idx] };
+                // Conservar id numérico estable
+                doc.id = editId;
+                // Comparar el estado anterior con el documento a guardar (ya con fechas formateadas)
+                const changes = describeDocumentChanges(before, doc);
+                // Reemplazo completo del objeto (más fiable que Object.assign)
+                data.documents[idx] = { ...before, ...doc, id: editId };
+                const detail = formatHistoryChangeList(changes);
+                const nom = doc.nomenclatura || before.nomenclatura || '';
+                const nam = doc.nombre || before.nombre || '';
+                const histText = changes.length
+                    ? ('✏️ ' + nom + ' (' + nam + ') actualizado — ' + detail)
+                    : ('✏️ ' + nom + ' (' + nam + ') actualizado — sin cambios en campos');
+                data.history.push({
+                    id: data.historyNextId++,
+                    text: histText,
+                    timestamp: Date.now()
+                });
+                console.log('[History]', histText);
+                console.log('[Save] Documento actualizado idx=' + idx, data.documents[idx]);
             } else {
-                const maxId = data.documents.reduce((max, d) => Math.max(max, d.id), 0);
+                const maxId = data.documents.reduce((max, d) => Math.max(max, Number(d.id) || 0), 0);
                 doc.id = maxId + 1;
                 data.documents.push(doc);
                 data.history.push({
@@ -8024,10 +8084,23 @@ function getFilteredData() {
                 });
             }
             reindexIds();
-            saveData(data);
-            renderAll();
+            // Esperar persistencia para no cerrar con datos a medias / carrera realtime
+            let saveOk = false;
+            try {
+                saveOk = await saveData(data);
+            } catch (err) {
+                console.error('[Save] Error al persistir:', err);
+                showToast('Error al guardar. Intente de nuevo.', 'warning');
+                return;
+            }
+            // Refrescar UI con los datos locales (ya actualizados)
             closeModal();
-            showToast(isEdit ? 'Documento actualizado' : 'Documento creado', 'success');
+            renderAll();
+            if (saveOk === false) {
+                showToast('Guardado local OK; no se pudo sincronizar con el servidor', 'warning');
+            } else {
+                showToast(isEdit ? 'Documento actualizado' : 'Documento creado', 'success');
+            }
         }
 
         function reindexIds() { data.documents.sort((a, b) => a.id - b.id);
@@ -8121,7 +8194,10 @@ function getFilteredData() {
             populateSelect('mClasificacion', getCatalogOptions('clasificacion', CLASIFICACIONES), '');
             populateSelect('mStatus', getCatalogOptions('status', ESTADOS), '');
             setTimeout(() => {
-                autoSetCategoria();
+                // Solo sugerir categoría al crear; en edición respetar el valor del documento
+                if (editingId === null) {
+                    autoSetCategoria();
+                }
                 onTipoChangeForPadre();
             }, 50);
             setTimeout(() => { document.querySelectorAll('.required-field').forEach(f => validateField(f)); }, 100);
