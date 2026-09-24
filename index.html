@@ -3862,6 +3862,110 @@
             }
         }
 
+        /** Huella de contenido de una solicitud (para detectar cualquier cambio). */
+        function solContentFingerprint(sol) {
+            if (!sol) return '';
+            const docs = (sol.documentIds || []).map(Number).filter(Boolean).sort((a, b) => a - b).join(',');
+            const cols = (sol.columns || []).map(String).slice().sort().join(',');
+            return [
+                String(sol.id || ''),
+                String(sol.password || ''),
+                String(sol.name || ''),
+                String(sol.expiresAt || 0),
+                docs,
+                cols,
+                sol.hideDashboard ? '1' : '0',
+                String(sol.updatedAt || sol.createdAt || 0)
+            ].join('|');
+        }
+
+        function solListSnapshot(list) {
+            return (list || []).map(s => solContentFingerprint(s)).sort().join('||');
+        }
+
+        /**
+         * Compara solicitud previa vs actual.
+         * @returns {'password'|'config'|'expired'|'removed'|null}
+         */
+        function detectSolicitudChange(prevSol, nextSol) {
+            if (!nextSol) return 'removed';
+            if (nextSol.expiresAt && Number(nextSol.expiresAt) <= Date.now()) return 'expired';
+            if (!prevSol) return null;
+            if (String(prevSol.password || '') !== String(nextSol.password || '')) return 'password';
+            // Misma contraseña pero otro cambio de contenido
+            const prevFp = solContentFingerprint({ ...prevSol, password: '' });
+            const nextFp = solContentFingerprint({ ...nextSol, password: '' });
+            if (prevFp !== nextFp) return 'config';
+            return null;
+        }
+
+        function mensajeKickSolicitud(reason) {
+            const map = {
+                password: 'Se cambió la contraseña de la solicitud. Debe ingresar de nuevo con la nueva contraseña.',
+                config: 'Se realizó una modificación en la solicitud. Sesión cerrada.',
+                expired: 'La solicitud ha expirado. Sesión cerrada.',
+                removed: 'La solicitud fue eliminada. Sesión cerrada.'
+            };
+            return map[reason] || 'La solicitud cambió. Sesión cerrada.';
+        }
+
+        /** Línea base de la solicitud con la que el consultor entró (para detectar cambios). */
+        let sharedViewBaseline = null;
+        let sharedViewPollTimer = null;
+
+        function stopSharedViewPoll() {
+            if (sharedViewPollTimer) {
+                clearInterval(sharedViewPollTimer);
+                sharedViewPollTimer = null;
+            }
+        }
+
+        function startSharedViewPoll() {
+            stopSharedViewPoll();
+            if (!sharedView || isManager) return;
+            sharedViewPollTimer = setInterval(async () => {
+                if (!sharedView || isManager) {
+                    stopSharedViewPoll();
+                    return;
+                }
+                // Si volvió al login/gateway, detener
+                if (document.getElementById('loginOverlay') || document.getElementById('accessGateway')) {
+                    stopSharedViewPoll();
+                    return;
+                }
+                try {
+                    await checkActiveSolicitudIntegrity();
+                } catch (e) {
+                    console.warn('[SharedView poll]', e);
+                }
+            }, 6000);
+        }
+
+        /**
+         * Verifica si la solicitud activa del consultor cambió / expiró / se eliminó.
+         * Si cambió, cierra sesión y envía al perfil Consultor (login).
+         * @returns {boolean} true si sigue válida
+         */
+        async function checkActiveSolicitudIntegrity() {
+            if (!sharedView || !sharedView.id || isManager) return true;
+            const prev = sharedViewBaseline || sharedView;
+            await loadSharedSolicitudes();
+            const sol = (sharedSolicitudes || []).find(s => s.id === sharedView.id);
+            const reason = detectSolicitudChange(prev, sol || null);
+            if (reason) {
+                stopSharedViewPoll();
+                await exitSharedViewToConsultorGateway(mensajeKickSolicitud(reason));
+                return false;
+            }
+            // Actualizar baseline de expiración/estado sin kick si no hubo cambio
+            if (sol) {
+                sharedViewBaseline = JSON.parse(JSON.stringify(sol));
+                sharedView = buildSharedViewFromSol(sol);
+            }
+            return true;
+        }
+
+
 
         let shareBulkFilters = { anio: [], unidad: [], area: [], departamento: [], categoria: [] };
         let editBulkFilters = { anio: [], unidad: [], area: [], departamento: [], categoria: [] };
@@ -3878,16 +3982,20 @@
         function getBulkFilterOptions(key, currentFilters, excludeKey) {
             let base = [...(data.documents || [])];
             if (excludeKey !== 'anio' && (currentFilters.anio||[]).length) {
-                base = base.filter(d => yearMatchesFilterSelection(d, currentFilters.anio));
+                base = base.filter(d => {
+                    if (!d.fechaActualizacion) return false;
+                    const p = String(d.fechaActualizacion).split('/');
+                    return p.length === 3 && currentFilters.anio.includes(p[2]);
+                });
             }
             if (excludeKey !== 'unidad' && (currentFilters.unidad||[]).length)
-                base = base.filter(d => valueMatchesFilterSelection(d.unidad, currentFilters.unidad));
+                base = base.filter(d => currentFilters.unidad.includes(d.unidad));
             if (excludeKey !== 'area' && (currentFilters.area||[]).length)
-                base = base.filter(d => valueMatchesFilterSelection(d.area, currentFilters.area));
+                base = base.filter(d => currentFilters.area.includes(d.area));
             if (excludeKey !== 'departamento' && (currentFilters.departamento||[]).length)
-                base = base.filter(d => valueMatchesFilterSelection(d.departamento, currentFilters.departamento));
+                base = base.filter(d => currentFilters.departamento.includes(d.departamento));
             if (excludeKey !== 'categoria' && (currentFilters.categoria||[]).length)
-                base = base.filter(d => valueMatchesFilterSelection(d.categoria, currentFilters.categoria));
+                base = base.filter(d => currentFilters.categoria.includes(d.categoria));
             if (key === 'anio') return getYearsFromDocs(base);
             return getUniqueValuesFromDocs(key, base);
         }
@@ -3897,12 +4005,16 @@
             if (!any) return [];
             let f = [...(data.documents || [])];
             if ((filters.anio||[]).length) {
-                f = f.filter(d => yearMatchesFilterSelection(d, filters.anio));
+                f = f.filter(d => {
+                    if (!d.fechaActualizacion) return false;
+                    const p = String(d.fechaActualizacion).split('/');
+                    return p.length === 3 && filters.anio.includes(p[2]);
+                });
             }
-            if ((filters.unidad||[]).length) f = f.filter(d => valueMatchesFilterSelection(d.unidad, filters.unidad));
-            if ((filters.area||[]).length) f = f.filter(d => valueMatchesFilterSelection(d.area, filters.area));
-            if ((filters.departamento||[]).length) f = f.filter(d => valueMatchesFilterSelection(d.departamento, filters.departamento));
-            if ((filters.categoria||[]).length) f = f.filter(d => valueMatchesFilterSelection(d.categoria, filters.categoria));
+            if ((filters.unidad||[]).length) f = f.filter(d => filters.unidad.includes(d.unidad));
+            if ((filters.area||[]).length) f = f.filter(d => filters.area.includes(d.area));
+            if ((filters.departamento||[]).length) f = f.filter(d => filters.departamento.includes(d.departamento));
+            if ((filters.categoria||[]).length) f = f.filter(d => filters.categoria.includes(d.categoria));
             return f;
         }
 
@@ -3914,7 +4026,7 @@
                 btn.textContent = BULK_DEFAULTS[key];
                 btn.classList.remove('filter-active');
             } else if (selected.length === 1) {
-                btn.textContent = filterValueLabel(selected[0]);
+                btn.textContent = selected[0];
                 btn.classList.add('filter-active');
             } else {
                 btn.textContent = selected.length + ' sel.';
@@ -3932,9 +4044,8 @@
             }
             container.innerHTML = options.map(opt => {
                 const checked = selected.includes(opt) ? 'checked' : '';
-                const label = filterValueLabel(opt);
                 return '<div class="option-item"><input type="checkbox" value="' +
-                    String(opt).replace(/"/g, '&quot;') + '" ' + checked + '><label>' + label + '</label></div>';
+                    String(opt).replace(/"/g, '&quot;') + '" ' + checked + '><label>' + opt + '</label></div>';
             }).join('');
         }
 
@@ -3984,7 +4095,7 @@
             if (!container) return;
             const options = JSON.parse(container.dataset.options || '[]');
             const q = (search || '').toLowerCase().trim();
-            const filtered = q ? options.filter(o => filterValueLabel(o).toLowerCase().includes(q) || String(o).toLowerCase().includes(q)) : options;
+            const filtered = q ? options.filter(o => String(o).toLowerCase().includes(q)) : options;
             renderBulkDropdownOptions(prefix, key, filtered, filters[key] || []);
             container.dataset.options = JSON.stringify(options);
         }
@@ -4151,7 +4262,9 @@
         }
 
         async function exitSharedViewToConsultorGateway(reasonMsg) {
+            stopSharedViewPoll();
             sharedView = null;
+            sharedViewBaseline = null;
             generalViewActive = false;
             document.body.classList.remove('shared-view');
             document.body.classList.remove('view-only');
@@ -4169,7 +4282,7 @@
             if (app) app.style.display = 'none';
             document.getElementById('accessGateway')?.remove();
             document.getElementById('loginOverlay')?.remove();
-            if (reasonMsg) showToast(reasonMsg, 'warning', 2800);
+            if (reasonMsg) showToast(reasonMsg, 'warning', 3200);
             // Volver a la tarjeta de perfil Consultor (login), no al gateway de solicitudes
             showLogin();
         }
@@ -4334,7 +4447,7 @@
             const docList = docs.map(d => `• ${d.nomenclatura} ${d.nombre || ''}`.trim()).join('\n');
             const subject = encodeURIComponent(`Acceso a documentación normativa: ${name}`);
             const body = encodeURIComponent(
-                `Se ha compartido acceso a documentos de Hermes — Sistema de Transferencia de Documentos del Departamento de Control Interno.\n\n` +
+                `Se ha compartido acceso a documentos de Hermes — Sistema de Transferencia de Documentos.\n\n` +
                 `Solicitud: ${name}\n` +
                 `Contraseña: ${password}\n` +
                 `Expira: ${expDate} (${solicitud.expirationLabel})\n\n` +
@@ -4775,6 +4888,7 @@
             if (!ok) return;
 
             const docs = (data.documents || []).filter(d => _editSolDocIds.includes(Number(d.id)));
+            const prevPassword = sol.password || '';
             sol.name = name;
             sol.password = password;
             sol.expiresAt = Date.now() + parseExpirationMs(exp.amount, exp.unit);
@@ -4785,6 +4899,9 @@
             sol.nomenclaturas = docs.map(d => d.nomenclatura);
             sol.columns = cols;
             sol.hideDashboard = !!(document.getElementById('editSolHideDashboard')?.checked);
+            sol.updatedAt = Date.now();
+            // Marca para que otros clientes detecten el tipo de cambio vía fingerprint
+            if (prevPassword !== password) sol.passwordChangedAt = sol.updatedAt;
 
             await persistSharedSolicitudes(sharedSolicitudes);
             data.history.push({
@@ -4806,7 +4923,7 @@
             ).join('\n') || '(sin documentos)';
             const subject = encodeURIComponent('Actualización de solicitud: ' + name);
             const body = encodeURIComponent(
-                'Se ha actualizado una solicitud de acceso a la Aplicación Hermes | Sistema de Transferencia de Documentos del Departamento de Control Interno.\n\n' +
+                'Se ha actualizado una solicitud de acceso a la Hermes.\n\n' +
                 'Solicitud: ' + name + '\n' +
                 'Contraseña: ' + password + '\n' +
                 'Nueva expiración: ' + expDate + ' (' + sol.expirationLabel + ')\n' +
@@ -4866,8 +4983,8 @@
 
         function startGatewayPoll() {
             stopGatewayPoll();
-            const snapshot = () => (sharedSolicitudes || []).map(s => s.id + ':' + (s.expiresAt || 0)).sort().join('|');
-            let last = snapshot();
+            let lastList = JSON.parse(JSON.stringify(sharedSolicitudes || []));
+            let lastSnap = solListSnapshot(lastList);
             gatewayPollTimer = setInterval(async () => {
                 if (!document.getElementById('accessGateway')) {
                     stopGatewayPoll();
@@ -4876,10 +4993,22 @@
                 try {
                     await loadSharedSolicitudes();
                     const now = Date.now();
-                    const beforeIds = (sharedSolicitudes || []).map(s => s.id);
+                    const prevById = {};
+                    (lastList || []).forEach(s => { if (s && s.id) prevById[s.id] = s; });
                     sharedSolicitudes = (sharedSolicitudes || []).filter(s => !s.expiresAt || s.expiresAt > now);
-                    const afterIds = sharedSolicitudes.map(s => s.id);
-                    const solsChanged = beforeIds.length !== afterIds.length || snapshot() !== last;
+                    const newSnap = solListSnapshot(sharedSolicitudes);
+                    let solKick = null; // password | config | expired | removed
+                    if (newSnap !== lastSnap) {
+                        // Solo expulsar si cambió/eliminó una solicitud que ya estaba listada
+                        // (crear una solicitud nueva no debe botar al consultor del listado)
+                        for (const id of Object.keys(prevById)) {
+                            const prev = prevById[id];
+                            const next = (sharedSolicitudes || []).find(s => s.id === id) || null;
+                            const r = detectSolicitudChange(prev, next);
+                            if (r === 'password') { solKick = 'password'; break; }
+                            if (r && !solKick) solKick = r;
+                        }
+                    }
 
                     const prevPwd = generalAccessConfig && generalAccessConfig.password;
                     const prevVer = generalAccessConfig && (generalAccessConfig.configVersion || generalAccessConfig.updatedAt);
@@ -4895,24 +5024,43 @@
                     }
                     if (generalAccessConfig && isGeneralAccessExpired(generalAccessConfig)) genKick = genKick || 'expired';
 
-                    if (solsChanged || genKick) {
-                        last = snapshot();
+                    if (solKick || genKick) {
+                        lastList = JSON.parse(JSON.stringify(sharedSolicitudes || []));
+                        lastSnap = solListSnapshot(lastList);
                         stopGatewayPoll();
                         document.getElementById('accessGateway')?.remove();
                         showLogin();
-                        const msg = genKick === 'password'
-                            ? 'Se cambió la contraseña de Hermes general. Use la nueva al entrar.'
-                            : genKick === 'config'
-                            ? 'Se actualizó la configuración de Hermes general.'
-                            : genKick === 'expired'
-                            ? 'El acceso a Hermes general ha expirado.'
-                            : 'Una o más solicitudes caducaron o fueron eliminadas';
+                        let msg;
+                        if (genKick === 'password') {
+                            msg = 'Se cambió la contraseña de Hermes general. Use la nueva al entrar.';
+                        } else if (genKick === 'config') {
+                            msg = 'Se realizó una modificación en Hermes general.';
+                        } else if (genKick === 'expired') {
+                            msg = 'El acceso a Hermes general ha expirado.';
+                        } else if (solKick === 'password') {
+                            msg = 'Se cambió la contraseña de una solicitud. Debe ingresar de nuevo con la nueva contraseña.';
+                        } else if (solKick === 'config') {
+                            msg = 'Se realizó una modificación en una solicitud.';
+                        } else if (solKick === 'expired') {
+                            msg = 'Una o más solicitudes han expirado.';
+                        } else {
+                            msg = 'Una o más solicitudes fueron eliminadas o modificadas.';
+                        }
                         showToast(msg, 'warning', 3200);
+                    } else {
+                        const listGrewOrChanged = newSnap !== lastSnap;
+                        lastList = JSON.parse(JSON.stringify(sharedSolicitudes || []));
+                        lastSnap = newSnap;
+                        // Si solo se agregaron solicitudes (sin modificar existentes), refrescar tarjetas
+                        if (listGrewOrChanged && document.getElementById('accessGateway')) {
+                            stopGatewayPoll();
+                            showConsultorGateway();
+                        }
                     }
                 } catch (e) {
                     console.warn('[Gateway poll]', e);
                 }
-            }, 8000);
+            }, 6000);
         }
 
         async function showConsultorGateway() {
@@ -5035,8 +5183,12 @@
 
             document.getElementById('accessGateway')?.remove();
             document.getElementById('loginOverlay')?.remove();
+            sharedViewBaseline = JSON.parse(JSON.stringify(sol));
             sharedView = buildSharedViewFromSol(sol);
+            // Conservar password en baseline para detectar cambio de contraseña
+            sharedView.password = sol.password;
             await enterAppAsConsultor();
+            startSharedViewPoll();
             showToast(`Vista compartida: ${sol.name}`, 'info');
         }
 
@@ -5050,21 +5202,34 @@
                 documentIds: (sol.documentIds || []).map(Number),
                 nomenclaturas: sol.nomenclaturas || [],
                 expiresAt: sol.expiresAt,
-                hideDashboard: !!sol.hideDashboard
+                hideDashboard: !!sol.hideDashboard,
+                password: sol.password || '',
+                updatedAt: sol.updatedAt || sol.createdAt || 0
             };
         }
 
-        /** Actualiza sharedView desde la lista de solicitudes (tras editar o realtime). */
+        /** Actualiza sharedView desde la lista de solicitudes (tras editar o realtime).
+         *  Cualquier cambio en la solicitud activa cierra la sesión del consultor. */
         async function refreshSharedViewState() {
             if (!sharedView || !sharedView.id) return true;
+            const prev = sharedViewBaseline || {
+                id: sharedView.id,
+                password: sharedView.password,
+                name: sharedView.name,
+                expiresAt: sharedView.expiresAt,
+                documentIds: sharedView.documentIds,
+                columns: sharedView.columns,
+                hideDashboard: sharedView.hideDashboard,
+                updatedAt: sharedView.updatedAt
+            };
             await loadSharedSolicitudes();
             const sol = sharedSolicitudes.find(s => s.id === sharedView.id);
-            if (!sol || (sol.expiresAt && sol.expiresAt <= Date.now())) {
-                await exitSharedViewToConsultorGateway(
-                    sol ? 'La solicitud ha expirado. Sesión cerrada.' : 'La solicitud fue eliminada. Sesión cerrada.'
-                );
+            const reason = detectSolicitudChange(prev, sol || null);
+            if (reason) {
+                await exitSharedViewToConsultorGateway(mensajeKickSolicitud(reason));
                 return false;
             }
+            sharedViewBaseline = JSON.parse(JSON.stringify(sol));
             sharedView = buildSharedViewFromSol(sol);
             document.body.classList.add('shared-view');
             applyViewOnlyMode();
@@ -5095,6 +5260,17 @@
             setupRealtimeSync();
             // Banner si es vista compartida
             injectSharedBanner();
+            if (sharedView && !isManager) {
+                if (!sharedViewBaseline) {
+                    // Recuperar baseline desde lista si se restauró sesión
+                    const sol = (sharedSolicitudes || []).find(s => s.id === sharedView.id);
+                    if (sol) sharedViewBaseline = JSON.parse(JSON.stringify(sol));
+                    else sharedViewBaseline = JSON.parse(JSON.stringify(sharedView));
+                }
+                startSharedViewPoll();
+            } else {
+                stopSharedViewPoll();
+            }
         }
 
         function injectSharedBanner() {
@@ -5444,7 +5620,9 @@
             });
             if (ok) {
                 teardownRealtimeSync();
+                stopSharedViewPoll();
                 sharedView = null;
+                sharedViewBaseline = null;
                 document.body.classList.remove('shared-view');
                 clearSession();
                 showToast('Sesión cerrada', 'info', 1500);
@@ -5648,17 +5826,21 @@
                 if (!session.isManager && session.sharedViewId) {
                     const sol = sharedSolicitudes.find(s => s.id === session.sharedViewId);
                     if (sol && sol.expiresAt && sol.expiresAt > Date.now()) {
+                        sharedViewBaseline = JSON.parse(JSON.stringify(sol));
                         sharedView = buildSharedViewFromSol(sol);
                         document.body.classList.add('shared-view');
                     } else {
                         // Solicitud ya no válida
                         session.sharedViewId = null;
                         localStorage.setItem('hermes_session', JSON.stringify(session));
+                        sharedView = null;
+                        sharedViewBaseline = null;
                     }
                 }
                 applyViewOnlyMode();
                 renderAll();
                 setupRealtimeSync();
+                if (sharedView && !isManager) startSharedViewPoll();
             } else {
                 showLogin();
             }
@@ -5752,35 +5934,17 @@
         }
 
         function getUniqueValuesFromDocs(key, docs) {
-            const src = docs || data.documents || [];
-            let hasEmpty = false;
-            const vals = new Set();
-            src.forEach(d => {
-                const v = d[key];
-                if (isEmptyFieldValue(v)) {
-                    hasEmpty = true;
-                } else {
-                    vals.add(String(v).trim());
-                }
-            });
-            const sorted = [...vals].sort((a, b) => String(a).localeCompare(String(b), 'es', { sensitivity: 'base' }));
-            // Opción de vacíos al inicio cuando existan registros sin valor
-            if (hasEmpty) sorted.unshift(EMPTY_FILTER_VALUE);
-            return sorted;
+            const src = docs || data.documents;
+            const vals = [...new Set(src.map(d => String(d[key] || '').trim()).filter(v => v !== ''))];
+            return vals.sort();
         }
 
         function getYearsFromDocs(docs) {
-            const src = docs || data.documents || [];
+            const src = docs || data.documents;
             const years = new Set();
-            let hasEmpty = false;
-            src.forEach(d => {
-                const y = getDocYearValue(d);
-                if (y === EMPTY_FILTER_VALUE) hasEmpty = true;
-                else years.add(y);
-            });
-            const sorted = [...years].sort();
-            if (hasEmpty) sorted.unshift(EMPTY_FILTER_VALUE);
-            return sorted;
+            src.forEach(d => { if (d.fechaActualizacion) { const p = d.fechaActualizacion.split('/'); if (p.length === 3)
+                        years.add(p[2]); } });
+            return [...years].sort();
         }
 
         // ============================================================
@@ -6222,12 +6386,20 @@
                     saveToLocalStorage(remote);
                 }
 
-                // Si estamos en una solicitud compartida, refrescar su configuración
-                // (documentos, columnas, dashboard) sin perder la vista filtrada
+                // Si estamos en una solicitud compartida: cualquier cambio cierra sesión
                 if (sharedView && !isManager) {
-                    await refreshSharedViewState();
+                    const ok = await checkActiveSolicitudIntegrity();
+                    if (!ok) {
+                        isSyncingFromRealtime = false;
+                        return;
+                    }
                 } else {
                     await loadSharedSolicitudes();
+                    // Si el consultor está en la sección de tarjetas (gateway), el poll se encarga;
+                    // si meta cambió y está en gateway, forzar revisión inmediata
+                    if (!isManager && document.getElementById('accessGateway')) {
+                        // El poll de gateway ya corre; no-op aquí
+                    }
                 }
 
                 applyViewOnlyMode();
@@ -6257,46 +6429,6 @@
         let currentFilters = {};
         let generalFilters = { anio: [], unidad: [], area: [], departamento: [], categoria: [] };
         let openDropdown = null;
-
-        // Valor especial para filtrar campos vacíos / sin dato
-        const EMPTY_FILTER_VALUE = '__EMPTY__';
-        const EMPTY_FILTER_LABEL = '(Vacío)';
-
-        function isEmptyFieldValue(v) {
-            return v === null || v === undefined || String(v).trim() === '';
-        }
-
-        function filterValueLabel(opt) {
-            return opt === EMPTY_FILTER_VALUE ? EMPTY_FILTER_LABEL : String(opt);
-        }
-
-        /** ¿El valor del documento coincide con alguna de las opciones seleccionadas del filtro? */
-        function valueMatchesFilterSelection(rawValue, selected) {
-            if (!selected || selected.length === 0) return true;
-            const isEmpty = isEmptyFieldValue(rawValue);
-            const str = isEmpty ? '' : String(rawValue).trim();
-            for (const sel of selected) {
-                if (sel === EMPTY_FILTER_VALUE) {
-                    if (isEmpty) return true;
-                } else if (str === String(sel).trim()) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        /** Año de fechaActualización, o EMPTY_FILTER_VALUE si no hay fecha válida */
-        function getDocYearValue(d) {
-            if (!d || !d.fechaActualizacion) return EMPTY_FILTER_VALUE;
-            const p = String(d.fechaActualizacion).split('/');
-            if (p.length === 3 && p[2]) return p[2];
-            return EMPTY_FILTER_VALUE;
-        }
-
-        function yearMatchesFilterSelection(d, selected) {
-            if (!selected || selected.length === 0) return true;
-            return selected.includes(getDocYearValue(d));
-        }
 
         const GEN_FILTER_LABELS = { anio: 'Año', unidad: 'Unidad', area: 'Área', departamento: 'Depto',
             categoria: 'Categoría' };
@@ -7064,19 +7196,23 @@ function loadRequiredFieldsLocal() {
         function getDataWithGeneralFilters() {
             let filtered = (typeof getScopedDocuments === 'function') ? getScopedDocuments() : [...data.documents];
             if (generalFilters.anio && generalFilters.anio.length > 0) {
-                filtered = filtered.filter(d => yearMatchesFilterSelection(d, generalFilters.anio));
+                filtered = filtered.filter(d => {
+                    if (!d.fechaActualizacion) return false;
+                    const p = String(d.fechaActualizacion).split('/');
+                    return p.length === 3 && generalFilters.anio.includes(p[2]);
+                });
             }
             if (generalFilters.unidad && generalFilters.unidad.length > 0) {
-                filtered = filtered.filter(d => valueMatchesFilterSelection(d.unidad, generalFilters.unidad));
+                filtered = filtered.filter(d => generalFilters.unidad.includes(d.unidad));
             }
             if (generalFilters.area && generalFilters.area.length > 0) {
-                filtered = filtered.filter(d => valueMatchesFilterSelection(d.area, generalFilters.area));
+                filtered = filtered.filter(d => generalFilters.area.includes(d.area));
             }
             if (generalFilters.departamento && generalFilters.departamento.length > 0) {
-                filtered = filtered.filter(d => valueMatchesFilterSelection(d.departamento, generalFilters.departamento));
+                filtered = filtered.filter(d => generalFilters.departamento.includes(d.departamento));
             }
             if (generalFilters.categoria && generalFilters.categoria.length > 0) {
-                filtered = filtered.filter(d => valueMatchesFilterSelection(d.categoria, generalFilters.categoria));
+                filtered = filtered.filter(d => generalFilters.categoria.includes(d.categoria));
             }
             return filtered;
         }
@@ -7085,7 +7221,7 @@ function loadRequiredFieldsLocal() {
             let filtered = [...baseData];
             for (const [key, values] of Object.entries(currentFilters)) {
                 if (values && values.length > 0) {
-                    filtered = filtered.filter(doc => valueMatchesFilterSelection(doc[key], values));
+                    filtered = filtered.filter(doc => values.includes(String(doc[key] || '')));
                 }
             }
             return filtered;
@@ -7248,10 +7384,9 @@ function getFilteredData() {
             }
             container.innerHTML = options.map(opt => {
                 const checked = selected.includes(opt) ? 'checked' : '';
-                const label = filterValueLabel(opt);
                 return `<div class="option-item">
-                    <input type="checkbox" value="${String(opt).replace(/"/g, '&quot;')}" ${checked} onchange="onOptionChange('${column}', this)">
-                    <label>${label}</label>
+                    <input type="checkbox" value="${opt.replace(/"/g, '&quot;')}" ${checked} onchange="onOptionChange('${column}', this)">
+                    <label>${opt}</label>
                 </div>`;
             }).join('');
             container.dataset.options = JSON.stringify(options);
@@ -7349,10 +7484,9 @@ function getFilteredData() {
             if (searchLower) filtered = options.filter(o => o.toLowerCase().includes(searchLower));
             container.innerHTML = filtered.map(opt => {
                 const checked = selected.includes(opt) ? 'checked' : '';
-                const label = filterValueLabel(opt);
                 return `<div class="option-item">
                     <input type="checkbox" value="${opt.replace(/"/g, '&quot;')}" ${checked} onchange="onOptionChange('${column}', this)">
-                    <label>${label}</label>
+                    <label>${opt}</label>
                 </div>`;
             }).join('');
         }
@@ -7390,23 +7524,27 @@ function getFilteredData() {
             let baseData = (typeof getScopedDocuments === 'function') ? getScopedDocuments() : [...data.documents];
             for (const [key, values] of Object.entries(currentFilters)) {
                 if (values && values.length > 0) {
-                    baseData = baseData.filter(doc => valueMatchesFilterSelection(doc[key], values));
+                    baseData = baseData.filter(doc => values.includes(String(doc[key] || '')));
                 }
             }
             if (excludeKey !== 'anio' && generalFilters.anio.length > 0) {
-                baseData = baseData.filter(d => yearMatchesFilterSelection(d, generalFilters.anio));
+                baseData = baseData.filter(d => {
+                    if (!d.fechaActualizacion) return false;
+                    const p = d.fechaActualizacion.split('/');
+                    return p.length === 3 && generalFilters.anio.includes(p[2]);
+                });
             }
             if (excludeKey !== 'unidad' && generalFilters.unidad.length > 0) {
-                baseData = baseData.filter(d => valueMatchesFilterSelection(d.unidad, generalFilters.unidad));
+                baseData = baseData.filter(d => generalFilters.unidad.includes(d.unidad));
             }
             if (excludeKey !== 'area' && generalFilters.area.length > 0) {
-                baseData = baseData.filter(d => valueMatchesFilterSelection(d.area, generalFilters.area));
+                baseData = baseData.filter(d => generalFilters.area.includes(d.area));
             }
             if (excludeKey !== 'departamento' && generalFilters.departamento.length > 0) {
-                baseData = baseData.filter(d => valueMatchesFilterSelection(d.departamento, generalFilters.departamento));
+                baseData = baseData.filter(d => generalFilters.departamento.includes(d.departamento));
             }
             if (excludeKey !== 'categoria' && generalFilters.categoria.length > 0) {
-                baseData = baseData.filter(d => valueMatchesFilterSelection(d.categoria, generalFilters.categoria));
+                baseData = baseData.filter(d => generalFilters.categoria.includes(d.categoria));
             }
             return baseData;
         }
@@ -7429,7 +7567,7 @@ function getFilteredData() {
                 btn.textContent = GEN_FILTER_DEFAULTS[key];
                 btn.classList.remove('filter-active');
             } else if (selected.length === 1) {
-                btn.textContent = filterValueLabel(selected[0]);
+                btn.textContent = selected[0];
                 btn.classList.add('filter-active');
             } else {
                 btn.textContent = `${selected.length} sel.`;
@@ -7449,10 +7587,9 @@ function getFilteredData() {
             container.dataset.options = JSON.stringify(options);
             container.innerHTML = options.map(opt => {
                 const checked = selected.includes(opt) ? 'checked' : '';
-                const label = filterValueLabel(opt);
                 return `<div class="option-item">
                     <input type="checkbox" value="${String(opt).replace(/"/g, '&quot;')}" ${checked} onchange="onGenOptionChange('${key}', this)">
-                    <label>${label}</label>
+                    <label>${opt}</label>
                 </div>`;
             }).join('');
         }
@@ -7524,13 +7661,12 @@ function getFilteredData() {
             const selected = generalFilters[key] || [];
             const searchLower = search.toLowerCase().trim();
             let filtered = options;
-            if (searchLower) filtered = options.filter(o => filterValueLabel(o).toLowerCase().includes(searchLower) || String(o).toLowerCase().includes(searchLower));
+            if (searchLower) filtered = options.filter(o => String(o).toLowerCase().includes(searchLower));
             container.innerHTML = filtered.map(opt => {
                 const checked = selected.includes(opt) ? 'checked' : '';
-                const label = filterValueLabel(opt);
                 return `<div class="option-item">
                     <input type="checkbox" value="${String(opt).replace(/"/g, '&quot;')}" ${checked} onchange="onGenOptionChange('${key}', this)">
-                    <label>${label}</label>
+                    <label>${opt}</label>
                 </div>`;
             }).join('');
         }
@@ -8804,16 +8940,20 @@ function getFilteredData() {
         function getDashboardFilteredData() {
             let f = (typeof getScopedDocuments === 'function') ? getScopedDocuments() : [...(data.documents || [])];
             if (dashboardFilters.anio && dashboardFilters.anio.length > 0) {
-                f = f.filter(d => yearMatchesFilterSelection(d, dashboardFilters.anio));
+                f = f.filter(d => {
+                    if (!d.fechaActualizacion) return false;
+                    const p = d.fechaActualizacion.split('/');
+                    return p.length === 3 && dashboardFilters.anio.includes(p[2]);
+                });
             }
             if (dashboardFilters.unidad && dashboardFilters.unidad.length > 0) {
-                f = f.filter(d => valueMatchesFilterSelection(d.unidad, dashboardFilters.unidad));
+                f = f.filter(d => dashboardFilters.unidad.includes(d.unidad));
             }
             if (dashboardFilters.area && dashboardFilters.area.length > 0) {
-                f = f.filter(d => valueMatchesFilterSelection(d.area, dashboardFilters.area));
+                f = f.filter(d => dashboardFilters.area.includes(d.area));
             }
             if (dashboardFilters.categoria && dashboardFilters.categoria.length > 0) {
-                f = f.filter(d => valueMatchesFilterSelection(d.categoria, dashboardFilters.categoria));
+                f = f.filter(d => dashboardFilters.categoria.includes(d.categoria));
             }
             return f;
         }
@@ -9015,16 +9155,20 @@ function getFilteredData() {
         function getBaseDataForDashFilter(excludeKey) {
             let baseData = (typeof getScopedDocuments === 'function') ? getScopedDocuments() : [...(data.documents || [])];
             if (excludeKey !== 'anio' && dashboardFilters.anio.length > 0) {
-                baseData = baseData.filter(d => yearMatchesFilterSelection(d, dashboardFilters.anio));
+                baseData = baseData.filter(d => {
+                    if (!d.fechaActualizacion) return false;
+                    const p = d.fechaActualizacion.split('/');
+                    return p.length === 3 && dashboardFilters.anio.includes(p[2]);
+                });
             }
             if (excludeKey !== 'unidad' && dashboardFilters.unidad.length > 0) {
-                baseData = baseData.filter(d => valueMatchesFilterSelection(d.unidad, dashboardFilters.unidad));
+                baseData = baseData.filter(d => dashboardFilters.unidad.includes(d.unidad));
             }
             if (excludeKey !== 'area' && dashboardFilters.area.length > 0) {
-                baseData = baseData.filter(d => valueMatchesFilterSelection(d.area, dashboardFilters.area));
+                baseData = baseData.filter(d => dashboardFilters.area.includes(d.area));
             }
             if (excludeKey !== 'categoria' && dashboardFilters.categoria && dashboardFilters.categoria.length > 0) {
-                baseData = baseData.filter(d => valueMatchesFilterSelection(d.categoria, dashboardFilters.categoria));
+                baseData = baseData.filter(d => dashboardFilters.categoria.includes(d.categoria));
             }
             return baseData;
         }
@@ -9046,7 +9190,7 @@ function getFilteredData() {
                 btn.textContent = DASH_FILTER_DEFAULTS[key];
                 btn.classList.remove('filter-active');
             } else if (selected.length === 1) {
-                btn.textContent = filterValueLabel(selected[0]);
+                btn.textContent = selected[0];
                 btn.classList.add('filter-active');
             } else {
                 btn.textContent = `${selected.length} sel.`;
@@ -9066,10 +9210,9 @@ function getFilteredData() {
             container.dataset.options = JSON.stringify(options);
             container.innerHTML = options.map(opt => {
                 const checked = selected.includes(opt) ? 'checked' : '';
-                const label = filterValueLabel(opt);
                 return `<div class="option-item">
                     <input type="checkbox" value="${String(opt).replace(/"/g, '&quot;')}" ${checked} onchange="onDashOptionChange('${key}', this)">
-                    <label>${label}</label>
+                    <label>${opt}</label>
                 </div>`;
             }).join('');
         }
@@ -9141,13 +9284,12 @@ function getFilteredData() {
             const selected = dashboardFilters[key] || [];
             const searchLower = search.toLowerCase().trim();
             let filtered = options;
-            if (searchLower) filtered = options.filter(o => filterValueLabel(o).toLowerCase().includes(searchLower) || String(o).toLowerCase().includes(searchLower));
+            if (searchLower) filtered = options.filter(o => String(o).toLowerCase().includes(searchLower));
             container.innerHTML = filtered.map(opt => {
                 const checked = selected.includes(opt) ? 'checked' : '';
-                const label = filterValueLabel(opt);
                 return `<div class="option-item">
                     <input type="checkbox" value="${String(opt).replace(/"/g, '&quot;')}" ${checked} onchange="onDashOptionChange('${key}', this)">
-                    <label>${label}</label>
+                    <label>${opt}</label>
                 </div>`;
             }).join('');
         }
