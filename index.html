@@ -4334,7 +4334,7 @@
             const docList = docs.map(d => `• ${d.nomenclatura} ${d.nombre || ''}`.trim()).join('\n');
             const subject = encodeURIComponent(`Acceso a documentación normativa: ${name}`);
             const body = encodeURIComponent(
-                `Se ha compartido acceso a documentos de Hermes — Sistema de Transferencia de Documentos.\n\n` +
+                `Se ha compartido acceso a documentos de Hermes — Sistema de Transferencia de Documentos del Departamento de Control Interno.\n\n` +
                 `Solicitud: ${name}\n` +
                 `Contraseña: ${password}\n` +
                 `Expira: ${expDate} (${solicitud.expirationLabel})\n\n` +
@@ -4806,7 +4806,7 @@
             ).join('\n') || '(sin documentos)';
             const subject = encodeURIComponent('Actualización de solicitud: ' + name);
             const body = encodeURIComponent(
-                'Se ha actualizado una solicitud de acceso a la Hermes.\n\n' +
+                'Se ha actualizado una solicitud de acceso a la Aplicación Hermes | Sistema de Transferencia de Documentos del Departamento de Control Interno.\n\n' +
                 'Solicitud: ' + name + '\n' +
                 'Contraseña: ' + password + '\n' +
                 'Nueva expiración: ' + expDate + ' (' + sol.expirationLabel + ')\n' +
