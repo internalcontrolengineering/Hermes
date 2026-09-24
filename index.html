@@ -5473,7 +5473,7 @@
                 <div class="login-overlay" id="loginOverlay">
                     <div class="carousel-container">
                         <div class="carousel-title">
-                            <div class="carousel-logo"><img src="https://raw.githubusercontent.com/internalcontrolengineering/Desarrollos/main/LogoCI-BC.png" alt="Hermes"></div>
+                            <div class="carousel-logo"><img src="https://raw.githubusercontent.com/internalcontrolengineering/Desarrollos/main/LogoCI-G.png" alt="Hermes"></div>
                             <h2>Hermes</h2>
                             <p>Sistema de Transferencia de Documentos | Control Interno</p>
                         </div>
@@ -9114,12 +9114,32 @@ function getFilteredData() {
                     const expected = ['Unidad de Negocio', 'Nomenclatura', 'Nombre', 'Macroproceso', 'Área',
                         'Departamento', 'Tipo de Documento', 'Categoría', 'Clasificación', 'Versión',
                         'Fecha de Emisión (1a versión)', 'Fecha de última Actualización', 'Fecha de Autorización',
-                        'Fecha de difusión', 'Hipervínculo', 'Comentarios', 'Estado'
+                        'Fecha de difusión', 'Hipervínculo', 'Comentarios', 'Documento Padre', 'Estado'
                     ];
                     const map = {};
-                    headers.forEach((h, i) => { const clean = h.trim().toLowerCase();
-                        expected.forEach((eh, idx) => { if (clean === eh.toLowerCase()) map[idx] = i; }); });
-                    const required = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16];
+                    headers.forEach((h, i) => {
+                        const clean = h.trim().toLowerCase();
+                        expected.forEach((eh, idx) => { if (clean === eh.toLowerCase()) map[idx] = i; });
+                        // Alias aceptados para Documento Padre
+                        if (clean === 'documento 1er / 2o nivel' || clean === 'documento padre (nomenclatura)' || clean === 'doc. padre') {
+                            map[16] = i;
+                        }
+                    });
+                    // Compatibilidad con plantillas antiguas (sin columna Documento Padre)
+                    if (map[17] === undefined) {
+                        const estadoIdx = headers.findIndex(h => h.trim().toLowerCase() === 'estado');
+                        if (estadoIdx >= 0) map[17] = estadoIdx;
+                    }
+                    if (map[16] === undefined) {
+                        const padreIdx = headers.findIndex(h => {
+                            const c = h.trim().toLowerCase();
+                            return c === 'documento padre' || c === 'documento 1er / 2o nivel' ||
+                                c === 'documento padre (nomenclatura)' || c === 'doc. padre';
+                        });
+                        if (padreIdx >= 0) map[16] = padreIdx;
+                    }
+                    // Estado obligatorio; Documento Padre opcional
+                    const required = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 17];
                     for (let idx of required) {
                         if (map[idx] === undefined) {
                             showToast(`No se encontró columna: "${expected[idx]}"`, 'warning');
@@ -9135,7 +9155,7 @@ function getFilteredData() {
                     let duplicates = [];
                     for (let i = 1; i < lines.length; i++) {
                         const vals = parseCSVLine(lines[i]);
-                        while (vals.length < 17) vals.push('');
+                        while (vals.length < 18) vals.push('');
                         const nom = vals[map[1]] || 'DOC-';
                         const nomNorm = normalizarNomenclatura(nom);
                         if (existingNorm.has(nomNorm) || batchNorm.has(nomNorm)) { duplicates.push(
@@ -9143,6 +9163,25 @@ function getFilteredData() {
                         batchNorm.add(nomNorm);
                         const tipo = vals[map[6]] || 'Sin tipo';
                         const cat = getCategoriaByTipo(tipo);
+                        // Documento Padre: nomenclatura pura o "NOM Nombre"
+                        let padreRaw = (map[16] !== undefined ? (vals[map[16]] || '') : '').trim();
+                        let padreNom = '';
+                        if (padreRaw) {
+                            const byExact = (data.documents || []).find(d =>
+                                String(d.nomenclatura || '').trim() === padreRaw ||
+                                normalizarNomenclatura(d.nomenclatura) === normalizarNomenclatura(padreRaw)
+                            );
+                            if (byExact) {
+                                padreNom = byExact.nomenclatura;
+                            } else {
+                                const token = (padreRaw.match(/^([A-Za-z0-9][A-Za-z0-9._\-\/]*)/) || [])[1] || padreRaw;
+                                const byNom = (data.documents || []).find(d =>
+                                    String(d.nomenclatura || '').trim() === token ||
+                                    normalizarNomenclatura(d.nomenclatura) === normalizarNomenclatura(token)
+                                );
+                                padreNom = byNom ? byNom.nomenclatura : token;
+                            }
+                        }
                         const doc = {
                             unidad: vals[map[0]] || 'Sin unidad',
                             nomenclatura: nom,
@@ -9160,7 +9199,8 @@ function getFilteredData() {
                             fechaDifusion: vals[map[13]] || '',
                             hipervinculo: vals[map[14]] || '',
                             comentarios: vals[map[15]] || '',
-                            status: vals[map[16]] || 'Nuevo'
+                            documentoPadre: padreNom || '',
+                            status: vals[map[17]] || 'Nuevo'
                         };
                         batchData.push(doc);
                     }
@@ -9451,10 +9491,10 @@ function getFilteredData() {
             const headers = ['Unidad de Negocio', 'Nomenclatura', 'Nombre', 'Macroproceso', 'Área', 'Departamento',
                 'Tipo de Documento', 'Categoría', 'Clasificación', 'Versión', 'Fecha de Emisión (1a versión)',
                 'Fecha de última Actualización', 'Fecha de Autorización', 'Fecha de difusión', 'Hipervínculo',
-                'Comentarios', 'Estado'
+                'Comentarios', 'Documento Padre', 'Estado'
             ];
             let csv = '\uFEFF' + headers.join(',') + '\n';
-            // 17 columnas alineadas con los encabezados (faltaba Macroproceso en el ejemplo anterior)
+            // 18 columnas: Documento Padre = nomenclatura del doc 1er/2o nivel (opcional)
             const example = [
                 'COMA',
                 'CM-PLG-CONTCI-01',
@@ -9472,6 +9512,7 @@ function getFilteredData() {
                 '01/01/2024',
                 'https://sites.google.com/trabajo.gob.pe/intranet/pol%C3%ADticas/control-interno/qu%C3%A9-es-el-control-interno?pli=1&authuser=0',
                 'Documento de nueva creación',
+                '',
                 'Nuevo'
             ];
             csv += example.map(escapeCSVField).join(',') + '\n';
