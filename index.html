@@ -3350,13 +3350,14 @@
             </p>
             <div style="margin-bottom:12px;">
                 <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:6px;"><i class="fas fa-key"></i> Contraseña y caducidad (General)</div>
+                <p style="font-size:9px;color:var(--text-secondary);margin:0 0 6px 0;">La contraseña es <strong>opcional</strong>. Sin contraseña el acceso General permanece bloqueado. La vigencia solo aplica cuando hay contraseña; al vencer se borra y hay que configurar de nuevo.</p>
                 <div style="display:flex;flex-direction:column;gap:8px;">
                     <div>
-                        <label style="font-size:10px;">Contraseña acceso General <span style="color:var(--red);">*</span></label>
-                        <input type="text" id="colvisGeneralPassword" maxlength="60" placeholder="Ingrese contraseña nueva" autocomplete="off" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-primary);color:var(--text-primary);font-size:11px;">
+                        <label style="font-size:10px;">Contraseña acceso General <span style="font-weight:400;color:var(--text-secondary);">(opcional)</span></label>
+                        <input type="text" id="colvisGeneralPassword" maxlength="60" placeholder="Dejar vacío = acceso no configurado" autocomplete="off" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-primary);color:var(--text-primary);font-size:11px;">
                     </div>
                     <div>
-                        <label style="font-size:10px;">Tiempo de acceso (desde guardar)</label>
+                        <label style="font-size:10px;">Tiempo de acceso (desde guardar, solo si hay contraseña)</label>
                         <div class="share-exp-row">
                             <div class="num-stepper">
                                 <button type="button" onclick="stepNumber('colvisExpAmount', -1)">−</button>
@@ -3862,110 +3863,6 @@
             }
         }
 
-        /** Huella de contenido de una solicitud (para detectar cualquier cambio). */
-        function solContentFingerprint(sol) {
-            if (!sol) return '';
-            const docs = (sol.documentIds || []).map(Number).filter(Boolean).sort((a, b) => a - b).join(',');
-            const cols = (sol.columns || []).map(String).slice().sort().join(',');
-            return [
-                String(sol.id || ''),
-                String(sol.password || ''),
-                String(sol.name || ''),
-                String(sol.expiresAt || 0),
-                docs,
-                cols,
-                sol.hideDashboard ? '1' : '0',
-                String(sol.updatedAt || sol.createdAt || 0)
-            ].join('|');
-        }
-
-        function solListSnapshot(list) {
-            return (list || []).map(s => solContentFingerprint(s)).sort().join('||');
-        }
-
-        /**
-         * Compara solicitud previa vs actual.
-         * @returns {'password'|'config'|'expired'|'removed'|null}
-         */
-        function detectSolicitudChange(prevSol, nextSol) {
-            if (!nextSol) return 'removed';
-            if (nextSol.expiresAt && Number(nextSol.expiresAt) <= Date.now()) return 'expired';
-            if (!prevSol) return null;
-            if (String(prevSol.password || '') !== String(nextSol.password || '')) return 'password';
-            // Misma contraseña pero otro cambio de contenido
-            const prevFp = solContentFingerprint({ ...prevSol, password: '' });
-            const nextFp = solContentFingerprint({ ...nextSol, password: '' });
-            if (prevFp !== nextFp) return 'config';
-            return null;
-        }
-
-        function mensajeKickSolicitud(reason) {
-            const map = {
-                password: 'Se cambió la contraseña de la solicitud. Debe ingresar de nuevo con la nueva contraseña.',
-                config: 'Se realizó una modificación en la solicitud. Sesión cerrada.',
-                expired: 'La solicitud ha expirado. Sesión cerrada.',
-                removed: 'La solicitud fue eliminada. Sesión cerrada.'
-            };
-            return map[reason] || 'La solicitud cambió. Sesión cerrada.';
-        }
-
-        /** Línea base de la solicitud con la que el consultor entró (para detectar cambios). */
-        let sharedViewBaseline = null;
-        let sharedViewPollTimer = null;
-
-        function stopSharedViewPoll() {
-            if (sharedViewPollTimer) {
-                clearInterval(sharedViewPollTimer);
-                sharedViewPollTimer = null;
-            }
-        }
-
-        function startSharedViewPoll() {
-            stopSharedViewPoll();
-            if (!sharedView || isManager) return;
-            sharedViewPollTimer = setInterval(async () => {
-                if (!sharedView || isManager) {
-                    stopSharedViewPoll();
-                    return;
-                }
-                // Si volvió al login/gateway, detener
-                if (document.getElementById('loginOverlay') || document.getElementById('accessGateway')) {
-                    stopSharedViewPoll();
-                    return;
-                }
-                try {
-                    await checkActiveSolicitudIntegrity();
-                } catch (e) {
-                    console.warn('[SharedView poll]', e);
-                }
-            }, 6000);
-        }
-
-        /**
-         * Verifica si la solicitud activa del consultor cambió / expiró / se eliminó.
-         * Si cambió, cierra sesión y envía al perfil Consultor (login).
-         * @returns {boolean} true si sigue válida
-         */
-        async function checkActiveSolicitudIntegrity() {
-            if (!sharedView || !sharedView.id || isManager) return true;
-            const prev = sharedViewBaseline || sharedView;
-            await loadSharedSolicitudes();
-            const sol = (sharedSolicitudes || []).find(s => s.id === sharedView.id);
-            const reason = detectSolicitudChange(prev, sol || null);
-            if (reason) {
-                stopSharedViewPoll();
-                await exitSharedViewToConsultorGateway(mensajeKickSolicitud(reason));
-                return false;
-            }
-            // Actualizar baseline de expiración/estado sin kick si no hubo cambio
-            if (sol) {
-                sharedViewBaseline = JSON.parse(JSON.stringify(sol));
-                sharedView = buildSharedViewFromSol(sol);
-            }
-            return true;
-        }
-
-
 
         let shareBulkFilters = { anio: [], unidad: [], area: [], departamento: [], categoria: [] };
         let editBulkFilters = { anio: [], unidad: [], area: [], departamento: [], categoria: [] };
@@ -4262,9 +4159,7 @@
         }
 
         async function exitSharedViewToConsultorGateway(reasonMsg) {
-            stopSharedViewPoll();
             sharedView = null;
-            sharedViewBaseline = null;
             generalViewActive = false;
             document.body.classList.remove('shared-view');
             document.body.classList.remove('view-only');
@@ -4282,7 +4177,7 @@
             if (app) app.style.display = 'none';
             document.getElementById('accessGateway')?.remove();
             document.getElementById('loginOverlay')?.remove();
-            if (reasonMsg) showToast(reasonMsg, 'warning', 3200);
+            if (reasonMsg) showToast(reasonMsg, 'warning', 2800);
             // Volver a la tarjeta de perfil Consultor (login), no al gateway de solicitudes
             showLogin();
         }
@@ -4532,11 +4427,55 @@
             const remote = await loadGeneralAccessFromSupabase();
             const local = loadGeneralAccessLocal();
             generalAccessConfig = remote || local || null;
-            if (generalAccessConfig) saveGeneralAccessLocal(generalAccessConfig);
+            if (remote && local) {
+                const rt = Number(remote.updatedAt || remote.configVersion || 0);
+                const lt = Number(local.updatedAt || local.configVersion || 0);
+                generalAccessConfig = rt >= lt ? remote : local;
+            }
+            if (generalAccessConfig) {
+                saveGeneralAccessLocal(generalAccessConfig);
+                // Si venció, borrar contraseña → estado no configurado
+                await clearGeneralAccessIfExpired(true);
+            }
         }
         function isGeneralAccessExpired(cfg) {
-            if (!cfg || !cfg.expiresAt) return false;
+            // La vigencia solo aplica si hay contraseña configurada
+            if (!cfg || !cfg.password || !String(cfg.password).trim()) return false;
+            if (!cfg.expiresAt) return false;
             return Number(cfg.expiresAt) <= Date.now();
+        }
+        /** Hay acceso General usable: contraseña definida y no vencida. */
+        function isGeneralAccessConfigured(cfg) {
+            if (!cfg) return false;
+            const pwd = (cfg.password != null) ? String(cfg.password).trim() : '';
+            if (!pwd) return false;
+            if (isGeneralAccessExpired(cfg)) return false;
+            return true;
+        }
+        /**
+         * Si la vigencia venció, borra la contraseña y la caducidad
+         * (vuelve al estado "Control Interno no ha configurado el acceso").
+         */
+        async function clearGeneralAccessIfExpired(persist) {
+            if (persist === undefined) persist = true;
+            if (!generalAccessConfig) return false;
+            if (!isGeneralAccessExpired(generalAccessConfig)) return false;
+            const cleared = Object.assign({}, generalAccessConfig, {
+                password: '',
+                expiresAt: null,
+                expirationLabel: '',
+                updatedAt: Date.now(),
+                configVersion: Date.now(),
+                clearedByExpiry: true
+            });
+            generalAccessConfig = cleared;
+            saveGeneralAccessLocal(cleared);
+            if (persist) {
+                try { await saveGeneralAccessToSupabase(cleared); } catch (e) {
+                    console.warn('[GeneralAccess] No se pudo persistir limpieza por vencimiento:', e);
+                }
+            }
+            return true;
         }
         function toggleColvisBulkDropdown(key, event) {
             toggleBulkDropdown('colvisbulk', key, event, colvisBulkFilters, COLVIS_BULK_BTNS);
@@ -4888,7 +4827,6 @@
             if (!ok) return;
 
             const docs = (data.documents || []).filter(d => _editSolDocIds.includes(Number(d.id)));
-            const prevPassword = sol.password || '';
             sol.name = name;
             sol.password = password;
             sol.expiresAt = Date.now() + parseExpirationMs(exp.amount, exp.unit);
@@ -4899,9 +4837,6 @@
             sol.nomenclaturas = docs.map(d => d.nomenclatura);
             sol.columns = cols;
             sol.hideDashboard = !!(document.getElementById('editSolHideDashboard')?.checked);
-            sol.updatedAt = Date.now();
-            // Marca para que otros clientes detecten el tipo de cambio vía fingerprint
-            if (prevPassword !== password) sol.passwordChangedAt = sol.updatedAt;
 
             await persistSharedSolicitudes(sharedSolicitudes);
             data.history.push({
@@ -4983,8 +4918,8 @@
 
         function startGatewayPoll() {
             stopGatewayPoll();
-            let lastList = JSON.parse(JSON.stringify(sharedSolicitudes || []));
-            let lastSnap = solListSnapshot(lastList);
+            const snapshot = () => (sharedSolicitudes || []).map(s => s.id + ':' + (s.expiresAt || 0)).sort().join('|');
+            let last = snapshot();
             gatewayPollTimer = setInterval(async () => {
                 if (!document.getElementById('accessGateway')) {
                     stopGatewayPoll();
@@ -4993,22 +4928,10 @@
                 try {
                     await loadSharedSolicitudes();
                     const now = Date.now();
-                    const prevById = {};
-                    (lastList || []).forEach(s => { if (s && s.id) prevById[s.id] = s; });
+                    const beforeIds = (sharedSolicitudes || []).map(s => s.id);
                     sharedSolicitudes = (sharedSolicitudes || []).filter(s => !s.expiresAt || s.expiresAt > now);
-                    const newSnap = solListSnapshot(sharedSolicitudes);
-                    let solKick = null; // password | config | expired | removed
-                    if (newSnap !== lastSnap) {
-                        // Solo expulsar si cambió/eliminó una solicitud que ya estaba listada
-                        // (crear una solicitud nueva no debe botar al consultor del listado)
-                        for (const id of Object.keys(prevById)) {
-                            const prev = prevById[id];
-                            const next = (sharedSolicitudes || []).find(s => s.id === id) || null;
-                            const r = detectSolicitudChange(prev, next);
-                            if (r === 'password') { solKick = 'password'; break; }
-                            if (r && !solKick) solKick = r;
-                        }
-                    }
+                    const afterIds = sharedSolicitudes.map(s => s.id);
+                    const solsChanged = beforeIds.length !== afterIds.length || snapshot() !== last;
 
                     const prevPwd = generalAccessConfig && generalAccessConfig.password;
                     const prevVer = generalAccessConfig && (generalAccessConfig.configVersion || generalAccessConfig.updatedAt);
@@ -5022,45 +4945,31 @@
                             prevDocs !== JSON.stringify(generalAccessConfig.documentIds || [])
                         ) genKick = 'config';
                     }
-                    if (generalAccessConfig && isGeneralAccessExpired(generalAccessConfig)) genKick = genKick || 'expired';
+                    if (generalAccessConfig && isGeneralAccessExpired(generalAccessConfig)) {
+                        await clearGeneralAccessIfExpired(true);
+                        genKick = genKick || 'expired';
+                    } else if (prevPwd && (!generalAccessConfig || !isGeneralAccessConfigured(generalAccessConfig))) {
+                        genKick = genKick || 'expired';
+                    }
 
-                    if (solKick || genKick) {
-                        lastList = JSON.parse(JSON.stringify(sharedSolicitudes || []));
-                        lastSnap = solListSnapshot(lastList);
+                    if (solsChanged || genKick) {
+                        last = snapshot();
                         stopGatewayPoll();
                         document.getElementById('accessGateway')?.remove();
                         showLogin();
-                        let msg;
-                        if (genKick === 'password') {
-                            msg = 'Se cambió la contraseña de Hermes general. Use la nueva al entrar.';
-                        } else if (genKick === 'config') {
-                            msg = 'Se realizó una modificación en Hermes general.';
-                        } else if (genKick === 'expired') {
-                            msg = 'El acceso a Hermes general ha expirado.';
-                        } else if (solKick === 'password') {
-                            msg = 'Se cambió la contraseña de una solicitud. Debe ingresar de nuevo con la nueva contraseña.';
-                        } else if (solKick === 'config') {
-                            msg = 'Se realizó una modificación en una solicitud.';
-                        } else if (solKick === 'expired') {
-                            msg = 'Una o más solicitudes han expirado.';
-                        } else {
-                            msg = 'Una o más solicitudes fueron eliminadas o modificadas.';
-                        }
+                        const msg = genKick === 'password'
+                            ? 'Se cambió la contraseña de Hermes general. Use la nueva al entrar.'
+                            : genKick === 'config'
+                            ? 'Se realizó una modificación en Hermes general.'
+                            : (genKick === 'expired' || genKick === 'removed')
+                            ? 'Control Interno no ha configurado el acceso'
+                            : 'Una o más solicitudes caducaron o fueron eliminadas';
                         showToast(msg, 'warning', 3200);
-                    } else {
-                        const listGrewOrChanged = newSnap !== lastSnap;
-                        lastList = JSON.parse(JSON.stringify(sharedSolicitudes || []));
-                        lastSnap = newSnap;
-                        // Si solo se agregaron solicitudes (sin modificar existentes), refrescar tarjetas
-                        if (listGrewOrChanged && document.getElementById('accessGateway')) {
-                            stopGatewayPoll();
-                            showConsultorGateway();
-                        }
                     }
                 } catch (e) {
                     console.warn('[Gateway poll]', e);
                 }
-            }, 6000);
+            }, 8000);
         }
 
         async function showConsultorGateway() {
@@ -5088,7 +4997,7 @@
                             <div class="gateway-card general" id="gwGeneral">
                                 <div class="gw-icon"><i class="fas fa-globe"></i></div>
                                 <div class="gw-title">General</div>
-                                <div class="gw-meta">Hermes configurada<br>(requiere contraseña)</div>
+                                <div class="gw-meta">Matriz general<br>(si Control Interno la configuró)</div>
                             </div>
                             ${cards}
                         </div>
@@ -5102,12 +5011,9 @@
             document.getElementById('gwGeneral').onclick = async () => {
                 await initGeneralAccessConfig();
                 const cfg = generalAccessConfig;
-                if (!cfg || !cfg.password) {
-                    showToast('El acceso General aún no está configurado por Control Interno', 'warning');
-                    return;
-                }
-                if (isGeneralAccessExpired(cfg)) {
-                    showToast('El acceso General ha expirado. Solicite una nueva configuración.', 'warning');
+                // Sin contraseña (o vencida y ya limpiada) → no configurado
+                if (!isGeneralAccessConfigured(cfg)) {
+                    showToast('Control Interno no ha configurado el acceso', 'warning');
                     return;
                 }
                 const pwd = await showPasswordConfirm({
@@ -5183,12 +5089,8 @@
 
             document.getElementById('accessGateway')?.remove();
             document.getElementById('loginOverlay')?.remove();
-            sharedViewBaseline = JSON.parse(JSON.stringify(sol));
             sharedView = buildSharedViewFromSol(sol);
-            // Conservar password en baseline para detectar cambio de contraseña
-            sharedView.password = sol.password;
             await enterAppAsConsultor();
-            startSharedViewPoll();
             showToast(`Vista compartida: ${sol.name}`, 'info');
         }
 
@@ -5202,34 +5104,21 @@
                 documentIds: (sol.documentIds || []).map(Number),
                 nomenclaturas: sol.nomenclaturas || [],
                 expiresAt: sol.expiresAt,
-                hideDashboard: !!sol.hideDashboard,
-                password: sol.password || '',
-                updatedAt: sol.updatedAt || sol.createdAt || 0
+                hideDashboard: !!sol.hideDashboard
             };
         }
 
-        /** Actualiza sharedView desde la lista de solicitudes (tras editar o realtime).
-         *  Cualquier cambio en la solicitud activa cierra la sesión del consultor. */
+        /** Actualiza sharedView desde la lista de solicitudes (tras editar o realtime). */
         async function refreshSharedViewState() {
             if (!sharedView || !sharedView.id) return true;
-            const prev = sharedViewBaseline || {
-                id: sharedView.id,
-                password: sharedView.password,
-                name: sharedView.name,
-                expiresAt: sharedView.expiresAt,
-                documentIds: sharedView.documentIds,
-                columns: sharedView.columns,
-                hideDashboard: sharedView.hideDashboard,
-                updatedAt: sharedView.updatedAt
-            };
             await loadSharedSolicitudes();
             const sol = sharedSolicitudes.find(s => s.id === sharedView.id);
-            const reason = detectSolicitudChange(prev, sol || null);
-            if (reason) {
-                await exitSharedViewToConsultorGateway(mensajeKickSolicitud(reason));
+            if (!sol || (sol.expiresAt && sol.expiresAt <= Date.now())) {
+                await exitSharedViewToConsultorGateway(
+                    sol ? 'La solicitud ha expirado. Sesión cerrada.' : 'La solicitud fue eliminada. Sesión cerrada.'
+                );
                 return false;
             }
-            sharedViewBaseline = JSON.parse(JSON.stringify(sol));
             sharedView = buildSharedViewFromSol(sol);
             document.body.classList.add('shared-view');
             applyViewOnlyMode();
@@ -5260,17 +5149,6 @@
             setupRealtimeSync();
             // Banner si es vista compartida
             injectSharedBanner();
-            if (sharedView && !isManager) {
-                if (!sharedViewBaseline) {
-                    // Recuperar baseline desde lista si se restauró sesión
-                    const sol = (sharedSolicitudes || []).find(s => s.id === sharedView.id);
-                    if (sol) sharedViewBaseline = JSON.parse(JSON.stringify(sol));
-                    else sharedViewBaseline = JSON.parse(JSON.stringify(sharedView));
-                }
-                startSharedViewPoll();
-            } else {
-                stopSharedViewPoll();
-            }
         }
 
         function injectSharedBanner() {
@@ -5550,10 +5428,20 @@
                 exitSharedViewToConsultorGateway('La solicitud ha expirado. Sesión cerrada.');
                 return;
             }
-            if (generalViewActive && generalAccessConfig && isGeneralAccessExpired(generalAccessConfig)) {
-                generalViewActive = false;
-                exitSharedViewToConsultorGateway('El acceso General ha expirado. Sesión cerrada.');
-                return;
+            if (generalViewActive && generalAccessConfig) {
+                if (isGeneralAccessExpired(generalAccessConfig)) {
+                    // Borrar contraseña al vencer y echar al consultor
+                    clearGeneralAccessIfExpired(true).then(() => {
+                        generalViewActive = false;
+                        exitSharedViewToConsultorGateway('Control Interno no ha configurado el acceso');
+                    });
+                    return;
+                }
+                if (!isGeneralAccessConfigured(generalAccessConfig)) {
+                    generalViewActive = false;
+                    exitSharedViewToConsultorGateway('Control Interno no ha configurado el acceso');
+                    return;
+                }
             }
             const minutes = Math.floor(remaining / 60000);
             const seconds = Math.floor((remaining % 60000) / 1000);
@@ -5620,9 +5508,7 @@
             });
             if (ok) {
                 teardownRealtimeSync();
-                stopSharedViewPoll();
                 sharedView = null;
-                sharedViewBaseline = null;
                 document.body.classList.remove('shared-view');
                 clearSession();
                 showToast('Sesión cerrada', 'info', 1500);
@@ -5826,21 +5712,17 @@
                 if (!session.isManager && session.sharedViewId) {
                     const sol = sharedSolicitudes.find(s => s.id === session.sharedViewId);
                     if (sol && sol.expiresAt && sol.expiresAt > Date.now()) {
-                        sharedViewBaseline = JSON.parse(JSON.stringify(sol));
                         sharedView = buildSharedViewFromSol(sol);
                         document.body.classList.add('shared-view');
                     } else {
                         // Solicitud ya no válida
                         session.sharedViewId = null;
                         localStorage.setItem('hermes_session', JSON.stringify(session));
-                        sharedView = null;
-                        sharedViewBaseline = null;
                     }
                 }
                 applyViewOnlyMode();
                 renderAll();
                 setupRealtimeSync();
-                if (sharedView && !isManager) startSharedViewPoll();
             } else {
                 showLogin();
             }
@@ -6352,16 +6234,20 @@
                     } else if (prevGen && !generalAccessConfig) {
                         kickReason = 'removed';
                     }
-                    const genExpired = generalAccessConfig && isGeneralAccessExpired(generalAccessConfig);
-                    if (genExpired && (generalViewActive || onGateway)) {
-                        kickReason = kickReason || 'expired';
+                    // Si venció, limpiar contraseña antes de echar
+                    if (generalAccessConfig && isGeneralAccessExpired(generalAccessConfig)) {
+                        await clearGeneralAccessIfExpired(true);
+                        if (generalViewActive || onGateway) kickReason = kickReason || 'expired';
+                    } else if (prevGen && prevGen.password && (!generalAccessConfig || !isGeneralAccessConfigured(generalAccessConfig))) {
+                        // Contraseña borrada (manual o por vencimiento en otro cliente)
+                        if (generalViewActive || onGateway) kickReason = kickReason || 'removed';
                     }
 
                     const kickMsg = {
                         password: 'Se cambió la contraseña de Hermes general. Debe ingresar de nuevo con la nueva contraseña.',
-                        config: 'Se actualizó la configuración de Hermes general (documentos, columnas o vigencia). Sesión cerrada.',
-                        expired: 'El acceso a Hermes general ha expirado. Sesión cerrada.',
-                        removed: 'El acceso a Hermes general ya no está disponible. Sesión cerrada.'
+                        config: 'Se realizó una modificación en Hermes general. Sesión cerrada.',
+                        expired: 'Control Interno no ha configurado el acceso',
+                        removed: 'Control Interno no ha configurado el acceso'
                     };
 
                     if (generalViewActive && kickReason) {
@@ -6386,20 +6272,12 @@
                     saveToLocalStorage(remote);
                 }
 
-                // Si estamos en una solicitud compartida: cualquier cambio cierra sesión
+                // Si estamos en una solicitud compartida, refrescar su configuración
+                // (documentos, columnas, dashboard) sin perder la vista filtrada
                 if (sharedView && !isManager) {
-                    const ok = await checkActiveSolicitudIntegrity();
-                    if (!ok) {
-                        isSyncingFromRealtime = false;
-                        return;
-                    }
+                    await refreshSharedViewState();
                 } else {
                     await loadSharedSolicitudes();
-                    // Si el consultor está en la sección de tarjetas (gateway), el poll se encarga;
-                    // si meta cambió y está en gateway, forzar revisión inmediata
-                    if (!isManager && document.getElementById('accessGateway')) {
-                        // El poll de gateway ya corre; no-op aquí
-                    }
                 }
 
                 applyViewOnlyMode();
@@ -6641,29 +6519,32 @@
 
             const hideDash = !!(document.getElementById('colvis_hideDashboard')?.checked);
             const password = (document.getElementById('colvisGeneralPassword')?.value || '').trim();
-            if (!password) {
-                showToast('Indique una contraseña para el acceso General', 'warning');
-                return;
-            }
             const exp = readExpFromInputs('colvisExpAmount', 'colvisExpUnit');
-            if (!exp.amount || exp.amount < 1) {
-                showToast('Indique un tiempo de acceso válido', 'warning');
+            // Contraseña opcional: sin ella el acceso queda no configurado.
+            // Si hay contraseña, la vigencia es obligatoria y empieza al guardar.
+            if (password && (!exp.amount || exp.amount < 1)) {
+                showToast('Indique un tiempo de acceso válido (la vigencia aplica con contraseña)', 'warning');
                 return;
             }
             const anyFilter = ['anio','unidad','area','departamento','categoria'].some(k => (colvisBulkFilters[k]||[]).length > 0);
             if (anyFilter) syncColvisDocsFromBulkFilters(true);
 
             const prevPassword = (generalAccessConfig && generalAccessConfig.password) || '';
-            const passwordChanged = prevPassword && prevPassword !== password;
+            const passwordChanged = !!prevPassword && prevPassword !== password;
+            const passwordCleared = !!prevPassword && !password;
 
             const parts = [];
             parts.push(visibleKeys.length + ' columna(s) visibles');
             if (hideDash) parts.push('Dashboard oculto');
             if (anyFilter) parts.push(colvisBulkDocIds.length + ' documentos');
-            parts.push('caduca en ' + formatExpirationLabel(exp.amount, exp.unit));
+            if (password) {
+                parts.push('contraseña activa; caduca en ' + formatExpirationLabel(exp.amount, exp.unit));
+            } else {
+                parts.push('sin contraseña (acceso General bloqueado)');
+            }
             const okConfirm = await showConfirm({
                 title: 'Guardar configuración de matriz general',
-                message: 'Se guardará: ' + parts.join('; ') + (passwordChanged ? '. La contraseña anterior dejará de funcionar.' : '') + ' ¿Continuar?',
+                message: 'Se guardará: ' + parts.join('; ') + (passwordChanged || passwordCleared ? '. Los consultores con sesión General deberán volver a autenticarse.' : '') + ' ¿Continuar?',
                 type: 'save',
                 confirmText: 'Guardar',
                 cancelText: 'Cancelar'
@@ -6678,11 +6559,11 @@
 
             const now = Date.now();
             const cfg = {
-                password: password,
-                expiresAt: now + parseExpirationMs(exp.amount, exp.unit),
-                expAmount: exp.amount,
-                expUnit: exp.unit,
-                expirationLabel: formatExpirationLabel(exp.amount, exp.unit),
+                password: password, // vacío = no configurado / sin acceso
+                expiresAt: password ? (now + parseExpirationMs(exp.amount, exp.unit)) : null,
+                expAmount: exp.amount || 30,
+                expUnit: exp.unit || 'd',
+                expirationLabel: password ? formatExpirationLabel(exp.amount, exp.unit) : '',
                 documentIds: anyFilter ? [...colvisBulkDocIds] : [],
                 nomenclaturas: anyFilter
                     ? (data.documents || []).filter(d => colvisBulkDocIds.includes(Number(d.id))).map(d => d.nomenclatura)
@@ -6696,35 +6577,36 @@
                 },
                 hideDashboard: hideDash,
                 updatedAt: now,
-                configVersion: now
+                configVersion: now,
+                clearedByExpiry: false
             };
             generalAccessConfig = cfg;
             saveGeneralAccessLocal(cfg);
             await saveGeneralAccessToSupabase(cfg);
 
-            // Correo de acceso general
-            const link = 'https://internalcontrolengineering.github.io/Hermes-Documental/';
-            const expDate = new Date(cfg.expiresAt).toLocaleString('es-ES', {
-                day: '2-digit', month: 'short', year: 'numeric',
-                hour: '2-digit', minute: '2-digit'
-            });
-            const subject = encodeURIComponent('Acceso a matriz general — Control Interno');
-            const body = encodeURIComponent(
-                'Se ha configurado / actualizado el acceso a la Hermes General de Transferencia de Documentos Interna.\n\n' +
-                'Contraseña de acceso General: ' + password + '\n' +
-                'Vigencia hasta: ' + expDate + ' (' + cfg.expirationLabel + ' desde la configuración)\n' +
-                'Documentos incluidos: ' + (cfg.documentIds.length ? cfg.documentIds.length + ' (según filtros)' : 'matriz completa') + '\n\n' +
-                'Para acceder:\n' +
-                '1. Abra: ' + link + '\n' +
-                '2. Perfil Consultor → tarjeta General\n' +
-                '3. Ingrese la contraseña indicada\n\n' +
-                'Atentamente,\nControl Interno'
-            );
-            try { window.open('mailto:?subject=' + subject + '&body=' + body, '_blank'); } catch (e) {}
+            // Correo solo si hay contraseña (acceso habilitado)
+            if (password) {
+                const link = 'https://internalcontrolengineering.github.io/Hermes-Documental/';
+                const expDate = new Date(cfg.expiresAt).toLocaleString('es-ES', {
+                    day: '2-digit', month: 'short', year: 'numeric',
+                    hour: '2-digit', minute: '2-digit'
+                });
+                const subject = encodeURIComponent('Acceso a matriz general — Control Interno');
+                const body = encodeURIComponent(
+                    'Se ha configurado / actualizado el acceso a la Hermes General de Transferencia de Documentos Interna.\n\n' +
+                    'Contraseña de acceso General: ' + password + '\n' +
+                    'Vigencia hasta: ' + expDate + ' (' + cfg.expirationLabel + ' desde la configuración)\n' +
+                    'Documentos incluidos: ' + (cfg.documentIds.length ? cfg.documentIds.length + ' (según filtros)' : 'matriz completa') + '\n\n' +
+                    'Para acceder:\n' +
+                    '1. Abra: ' + link + '\n' +
+                    '2. Perfil Consultor → tarjeta General\n' +
+                    '3. Ingrese la contraseña indicada\n\n' +
+                    'Atentamente,\nControl Interno'
+                );
+                try { window.open('mailto:?subject=' + subject + '&body=' + body, '_blank'); } catch (e) {}
+            }
 
-            // Si hay sesión local en General con contraseña distinta, no aplica a esta pestaña manager;
-            // el kick a consultores se hace por realtime/poll
-            if (passwordChanged) {
+            if (passwordChanged || passwordCleared) {
                 try {
                     localStorage.setItem('hermes_general_pwd_revoked_at', String(now));
                 } catch (e) {}
@@ -6732,7 +6614,12 @@
 
             applyViewOnlyMode();
             closeColumnVisibilityModal();
-            showToast('Configuración de matriz general guardada y correo abierto', 'success');
+            showToast(
+                password
+                    ? 'Configuración de matriz general guardada' + (password ? ' y correo abierto' : '')
+                    : 'Configuración guardada. Acceso General sin contraseña (bloqueado para consultores)',
+                'success'
+            );
         }
 
         function isColumnHiddenForStakeholder(key) {
