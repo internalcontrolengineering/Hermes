@@ -101,9 +101,9 @@
             border: 1px solid rgba(203, 213, 225, 0.6);
             box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
             display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
+            justify-content: flex-start;
+            align-items: flex-start;
+            flex-wrap: nowrap;
             gap: 12px 20px;
             margin-bottom: 14px;
             transition: background 0.3s ease;
@@ -117,6 +117,9 @@
             display: flex;
             align-items: center;
             gap: 14px;
+            flex: 1;
+            min-width: 0;
+            padding-right: 130px;
         }
         .header-logo {
             height: 70px;
@@ -164,7 +167,11 @@
             display: flex;
             align-items: center;
             gap: 6px;
-            flex-wrap: wrap;
+            flex-wrap: nowrap;
+            position: absolute;
+            top: 14px;
+            right: 22px;
+            z-index: 5;
         }
 
         .btn {
@@ -2964,6 +2971,117 @@
             border-color: var(--border-color);
             font-weight: 500;
         }
+
+        /* ===== MARQUESINA (junto al logo, bajo subtítulo) — teal Hermes ===== */
+        .marquee-bar{
+          position: relative;
+          width: min(560px, 100%);
+          height: 26px;
+          margin: 6px 0 0 0;
+          background: linear-gradient(180deg, rgba(13,148,136,0.16), rgba(13,148,136,0.05));
+          border: 1.5px solid rgba(13,148,136,0.42);
+          border-radius: 999px;
+          overflow: hidden;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          box-shadow:
+            0 1px 4px rgba(13,148,136,0.14),
+            inset 0 1px 0 rgba(255,255,255,0.35);
+          transition: border-color .25s ease, background .25s ease, box-shadow .25s ease;
+        }
+        .marquee-bar:hover{
+          border-color: rgba(13,148,136,0.72);
+          background: linear-gradient(180deg, rgba(13,148,136,0.26), rgba(20,184,166,0.10));
+          box-shadow:
+            0 2px 10px rgba(13,148,136,0.22),
+            inset 0 1px 0 rgba(255,255,255,0.4);
+        }
+        .marquee-bar::after{
+          content: "";
+          position: absolute;
+          inset: 0;
+          border-radius: 999px;
+          background: linear-gradient(90deg,
+            rgba(230,247,245,0.95) 0%,
+            rgba(230,247,245,0) 10%,
+            rgba(230,247,245,0) 90%,
+            rgba(230,247,245,0.95) 100%);
+          pointer-events: none;
+          z-index: 2;
+        }
+        .marquee-track{
+          display: flex;
+          align-items: center;
+          white-space: nowrap;
+          animation: marqueeScroll 30s linear infinite;
+          will-change: transform;
+          position: relative;
+          z-index: 1;
+        }
+        .marquee-bar:hover .marquee-track{ animation-play-state: paused; }
+        @keyframes marqueeScroll {
+          0% { transform: translateX(0); }
+          100% { transform: translateX(-50%); }
+        }
+        @media (prefers-reduced-motion: reduce){
+          .marquee-track{ animation: none; }
+        }
+        .marquee-item{
+          display: inline-flex;
+          align-items: center;
+          gap: 7px;
+          padding: 0 14px;
+          font-size: 0.65rem;
+          font-weight: 700;
+          letter-spacing: 1px;
+          text-transform: uppercase;
+          color: #0f766e;
+        }
+        .marquee-item .mq-sep{
+          color: rgba(13,148,136,0.50);
+          font-weight: 400;
+          margin: 0 2px;
+        }
+        .marquee-item .mq-cta{
+          font-weight: 800;
+          letter-spacing: 1px;
+          padding: 2px 8px;
+          border-radius: 999px;
+          background: linear-gradient(180deg, #14b8a6, #0d9488);
+          border: 1px solid rgba(15,118,110,0.35);
+          color: #ffffff;
+          margin-left: 4px;
+          box-shadow: 0 1px 3px rgba(13,148,136,0.28);
+        }
+        [data-theme="dark"] .marquee-bar{
+          background: linear-gradient(180deg, rgba(45,212,191,0.20), rgba(13,148,136,0.08));
+          border-color: rgba(45,212,191,0.40);
+        }
+        [data-theme="dark"] .marquee-bar::after{
+          background: linear-gradient(90deg,
+            rgba(15,46,43,0.95) 0%,
+            rgba(15,46,43,0) 10%,
+            rgba(15,46,43,0) 90%,
+            rgba(15,46,43,0.95) 100%);
+        }
+        [data-theme="dark"] .marquee-item{
+          color: #5eead4;
+        }
+        [data-theme="dark"] .marquee-item .mq-sep{
+          color: rgba(94,234,212,0.50);
+        }
+        [data-theme="dark"] .marquee-item .mq-cta{
+          background: linear-gradient(180deg, #2dd4bf, #14b8a6);
+          color: #0a1f1d;
+          border-color: rgba(94,234,212,0.40);
+        }
+        @media (max-width: 640px) {
+          .header-left { padding-right: 90px; }
+          .header-actions { top: 10px; right: 12px; }
+          .marquee-bar { width: min(280px, 100%); height: 24px; }
+          .marquee-item { font-size: 0.55rem; padding: 0 10px; }
+        }
     </style>
 </head>
 <body>
@@ -2974,6 +3092,32 @@
                 <div class="header-title-group">
                     <h1>Hermes</h1>
                     <span class="header-subtitle">Sistema de Transferencia de Documentos | Control Interno</span>
+                    <div class="marquee-bar" onclick="window.location.href='https://internalcontrolengineering.github.io/CI/'" role="button" tabindex="0" aria-label="Conoce sobre el Departamento de Control Interno">
+                      <div class="marquee-track">
+                        <span class="marquee-item">
+                          Conoce sobre el Departamento de Control Interno
+                          <span class="mq-sep">|</span>
+                          Funciones
+                          <span class="mq-sep">|</span>
+                          Componentes
+                          <span class="mq-sep">|</span>
+                          Mitos y Realidades
+                          <span class="mq-sep">|</span>
+                          <span class="mq-cta">Clic aquí</span>
+                        </span>
+                        <span class="marquee-item">
+                          Conoce sobre el Departamento de Control Interno
+                          <span class="mq-sep">|</span>
+                          Funciones
+                          <span class="mq-sep">|</span>
+                          Componentes
+                          <span class="mq-sep">|</span>
+                          Mitos y Realidades
+                          <span class="mq-sep">|</span>
+                          <span class="mq-cta">Clic aquí</span>
+                        </span>
+                      </div>
+                    </div>
                 </div>
             </div>
             <div class="header-actions">
